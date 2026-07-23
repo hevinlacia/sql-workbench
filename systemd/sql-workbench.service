@@ -1,0 +1,17 @@
+[Unit]
+Description=SQL Workbench MySQL web console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hevin/Developer/tools/sql-workbench/backend
+Environment=SQL_WORKBENCH_BIND=127.0.0.1:8788
+Environment=SQL_WORKBENCH_FRONTEND_DIR=/home/hevin/Developer/tools/sql-workbench/frontend/dist
+ExecStart=/home/hevin/Developer/tools/sql-workbench/backend/target/release/sql-workbench-backend
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
