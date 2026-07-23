@@ -43,6 +43,8 @@ struct SavedConnection {
     port: u16,
     username: String,
     password: String,
+    #[serde(default = "default_database_type")]
+    database_type: String,
     database: Option<String>,
     max_connections: u32,
     last_server_version: Option<String>,
@@ -117,6 +119,8 @@ struct ConnectRequest {
     port: u16,
     username: String,
     password: String,
+    #[serde(default = "default_database_type")]
+    database_type: String,
     #[serde(default)]
     database: Option<String>,
     #[serde(default)]
@@ -132,6 +136,7 @@ struct ConnectionSummary {
     host: String,
     port: u16,
     username: String,
+    database_type: String,
     database: Option<String>,
     server_version: Option<String>,
     connected: bool,
@@ -212,6 +217,10 @@ fn default_mysql_port() -> u16 {
 
 fn default_max_connections() -> u32 {
     5
+}
+
+fn default_database_type() -> String {
+    "mysql".to_string()
 }
 
 fn default_max_rows() -> usize {
@@ -600,6 +609,13 @@ fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnect
         return Err(ApiError::bad_request("username is required"));
     }
 
+    let database_type = request.database_type.trim().to_ascii_lowercase();
+    if database_type != "mysql" {
+        return Err(ApiError::bad_request(
+            "only mysql database type is supported",
+        ));
+    }
+
     let label = request
         .label
         .as_deref()
@@ -615,6 +631,7 @@ fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnect
         port: request.port,
         username: username.to_owned(),
         password: request.password,
+        database_type,
         database,
         max_connections: request.max_connections.clamp(1, 20),
         last_server_version: None,
@@ -628,6 +645,7 @@ fn summary_from_saved(saved: &SavedConnection, connected: bool) -> ConnectionSum
         host: saved.host.clone(),
         port: saved.port,
         username: saved.username.clone(),
+        database_type: saved.database_type.clone(),
         database: saved.database.clone(),
         server_version: saved.last_server_version.clone(),
         connected,

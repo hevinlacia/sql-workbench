@@ -22,6 +22,7 @@ type ConnectionSummary = {
   host: string
   port: number
   username: string
+  database_type: string
   database?: string | null
   server_version?: string | null
   connected: boolean
@@ -90,6 +91,7 @@ type ConnectForm = {
   port: string
   username: string
   password: string
+  databaseType: string
   database: string
   max_connections: string
 }
@@ -100,6 +102,7 @@ const initialForm: ConnectForm = {
   port: '3306',
   username: 'root',
   password: '',
+  databaseType: 'mysql',
   database: '',
   max_connections: '5',
 }
@@ -178,6 +181,7 @@ function App() {
           port: Number(form.port || 3306),
           username: form.username,
           password: form.password,
+          database_type: form.databaseType,
           database: form.database || undefined,
           max_connections: Number(form.max_connections || 5),
         }),
@@ -508,6 +512,12 @@ function App() {
                 <label>
                   Label
                   <input value={form.label} onChange={(event) => updateForm('label', event.target.value)} />
+                </label>
+                <label>
+                  Database type
+                  <select value={form.databaseType} onChange={(event) => updateForm('databaseType', event.target.value)}>
+                    <option value="mysql">MySQL</option>
+                  </select>
                 </label>
                 <label>
                   Host
