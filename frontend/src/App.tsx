@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Save,
   Server,
+  X,
   Table2,
   TerminalSquare,
   Trash2,
@@ -123,6 +124,7 @@ function App() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [connecting, setConnecting] = useState(false)
+  const [connectionModalOpen, setConnectionModalOpen] = useState(false)
   const [loadingConnections, setLoadingConnections] = useState(false)
   const [loadingDatabases, setLoadingDatabases] = useState(false)
   const [loadingTablesKey, setLoadingTablesKey] = useState('')
@@ -183,6 +185,7 @@ function App() {
       setConnections((current) => [response, ...current.filter((item) => item.connection_id !== response.connection_id)])
       setMessage(`Saved and connected: ${response.label}`)
       await selectConnection(response.connection_id)
+      setConnectionModalOpen(false)
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -322,50 +325,10 @@ function App() {
           </div>
         </div>
 
-        <section className="panel connection-panel">
-          <div className="panel-title">
-            <Save size={16} /> Add saved connection
-          </div>
-          <div className="field-grid">
-            <label>
-              Label
-              <input value={form.label} onChange={(event) => updateForm('label', event.target.value)} />
-            </label>
-            <label>
-              Host
-              <input value={form.host} onChange={(event) => updateForm('host', event.target.value)} />
-            </label>
-            <label>
-              Port
-              <input value={form.port} onChange={(event) => updateForm('port', event.target.value)} />
-            </label>
-            <label>
-              User
-              <input value={form.username} onChange={(event) => updateForm('username', event.target.value)} />
-            </label>
-            <label>
-              Password
-              <input
-                value={form.password}
-                onChange={(event) => updateForm('password', event.target.value)}
-                type="password"
-                autoComplete="current-password"
-              />
-            </label>
-            <label>
-              Default DB
-              <input
-                value={form.database}
-                onChange={(event) => updateForm('database', event.target.value)}
-                placeholder="optional"
-              />
-            </label>
-          </div>
-          <button className="primary-button" onClick={createConnection} disabled={connecting}>
-            {connecting ? <Loader2 className="spin" size={16} /> : <PlugZap size={16} />}
-            Save & connect
-          </button>
-        </section>
+        <button className="primary-button add-connection-button" onClick={() => setConnectionModalOpen(true)}>
+          <Save size={16} />
+          Add saved connection
+        </button>
       </aside>
 
       <section className="workspace">
@@ -512,6 +475,84 @@ function App() {
           </section>
         </div>
       </section>
+
+      {connectionModalOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !connecting) {
+              setConnectionModalOpen(false)
+            }
+          }}
+        >
+          <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="connection-dialog-title">
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">New saved connection</p>
+                <h3 id="connection-dialog-title">Add MySQL connection</h3>
+                <span className="muted">Connection details are saved locally for this service.</span>
+              </div>
+              <button className="icon-button" onClick={() => setConnectionModalOpen(false)} disabled={connecting} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+
+            <form
+              className="modal-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void createConnection()
+              }}
+            >
+              <div className="field-grid">
+                <label>
+                  Label
+                  <input value={form.label} onChange={(event) => updateForm('label', event.target.value)} />
+                </label>
+                <label>
+                  Host
+                  <input value={form.host} onChange={(event) => updateForm('host', event.target.value)} />
+                </label>
+                <label>
+                  Port
+                  <input value={form.port} onChange={(event) => updateForm('port', event.target.value)} />
+                </label>
+                <label>
+                  User
+                  <input value={form.username} onChange={(event) => updateForm('username', event.target.value)} />
+                </label>
+                <label>
+                  Password
+                  <input
+                    value={form.password}
+                    onChange={(event) => updateForm('password', event.target.value)}
+                    type="password"
+                    autoComplete="current-password"
+                  />
+                </label>
+                <label>
+                  Default DB
+                  <input
+                    value={form.database}
+                    onChange={(event) => updateForm('database', event.target.value)}
+                    placeholder="optional"
+                  />
+                </label>
+              </div>
+
+              <div className="modal-actions">
+                <button className="secondary-button" type="button" onClick={() => setConnectionModalOpen(false)} disabled={connecting}>
+                  Cancel
+                </button>
+                <button className="primary-button compact" type="submit" disabled={connecting}>
+                  {connecting ? <Loader2 className="spin" size={16} /> : <PlugZap size={16} />}
+                  Save & connect
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   )
 }

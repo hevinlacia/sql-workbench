@@ -91,14 +91,13 @@ button:disabled {
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.22);
 }
 
-.connection-panel,
 .tree-panel,
 .detail-panel,
 .editor-panel {
   padding: 16px;
 }
 
-.connection-panel {
+.add-connection-button {
   margin-top: 16px;
 }
 
@@ -125,8 +124,8 @@ button:disabled {
 
 .field-grid {
   display: grid;
-  grid-template-columns: 1fr 92px;
-  gap: 10px;
+  grid-template-columns: 1fr 120px;
+  gap: 12px;
 }
 
 .field-grid label:first-child,
@@ -542,6 +541,49 @@ tr:hover td {
 .null-value {
   color: #64748b;
   font-style: italic;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.modal-card {
+  width: min(640px, 100%);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 22px;
+  background: #111827;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.42);
+  padding: 20px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.modal-header h3 {
+  margin: 0 0 4px;
+  font-size: 22px;
+}
+
+.modal-form {
+  display: grid;
+  gap: 18px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .spin {
