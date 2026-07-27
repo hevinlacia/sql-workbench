@@ -1,0 +1,47 @@
+backend/Cargo.toml
+  a8526ccc558819f4 10,16
+README.md
+  a8526ccc558819f4 56-64
+backend/src/main.rs
+  5ccdeb6756219e81 189-190,484-485,493,882-896
+  a8526ccc558819f4 12,118-120,124,126,600-601,609-610,614-643,665,671,673,681-789
+frontend/src/App.tsx
+  5ccdeb6756219e81 7,14,72,151,161-165,256,287,463-475,487-489,535-540,729-757
+  a8526ccc558819f4 5,92-94,96,98,109,111,135,143-145,166-173,179,205,210-214,216,315,334,357-369,371-382,384-389,522-534,541-562,598-614,626-676,696,698,762-808,811,819-840,844,898-916
+frontend/src/App.css
+  5ccdeb6756219e81 435-469,590-606,610-633
+  a8526ccc558819f4 42-46,54-83,131,170-171,219-223,508-513,516,519,523-525,548-589,634-635,665-670,718-751,805-834
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "11d35545691f889cc709990896a57b478d4c7334",
+  "prompts": {
+    "5ccdeb6756219e81": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fa24a-16e6-7a54-895c-4ee471096b09",
+        "model": "glm-latest-auto"
+      },
+      "human_author": "hevinlacia",
+      "messages": [],
+      "total_additions": 167,
+      "total_deletions": 2,
+      "accepted_lines": 167,
+      "overriden_lines": 0
+    },
+    "a8526ccc558819f4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fa140-8fdb-7708-acf8-7d66e1dc33b8",
+        "model": "glm-latest-auto"
+      },
+      "human_author": "hevinlacia",
+      "messages": [],
+      "total_additions": 689,
+      "total_deletions": 198,
+      "accepted_lines": 595,
+      "overriden_lines": 0
+    }
+  }
+}
