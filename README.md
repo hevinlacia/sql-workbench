@@ -53,6 +53,15 @@ Default URLs:
 
 Saved connections are persisted to `~/.config/sql-workbench/connections.json` by default. Passwords are never returned to the frontend, but they are stored locally so the service can reconnect after restart. Override the path with `SQL_WORKBENCH_CONFIG` if needed.
 
+Connections can be created either by separate fields (`host`, `port`, `username`, `password`, optional database) or by a connection URL. Supported URL examples:
+
+```text
+mysql://root:password@127.0.0.1:3306/app_db
+jdbc:mysql://127.0.0.1:3306/app_db?user=root&password=secret
+```
+
+When using URL mode, URL values take precedence over the separate host/user/password/database fields.
+
 ## Systemd
 
 A user-level unit is included at `systemd/sql-workbench.service`.

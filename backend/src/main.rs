@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, json};
 use sqlx::{
@@ -114,10 +115,15 @@ impl From<serde_json::Error> for ApiError {
 
 #[derive(Debug, Deserialize)]
 struct ConnectRequest {
+    #[serde(default)]
+    connection_url: Option<String>,
+    #[serde(default)]
     host: String,
     #[serde(default = "default_mysql_port")]
     port: u16,
+    #[serde(default)]
     username: String,
+    #[serde(default)]
     password: String,
     #[serde(default = "default_database_type")]
     database_type: String,
@@ -180,6 +186,8 @@ struct TableDetailResponse {
     data_columns: Vec<ColumnInfo>,
     rows: Vec<Map<String, Value>>,
     sample_limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ddl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,6 +481,8 @@ async fn get_table_detail(
         .collect::<Vec<_>>();
     let data = rows.iter().map(row_to_json_map).collect::<Vec<_>>();
 
+    let ddl = show_create_table(&pool, &database, &table).await.ok();
+
     Ok(Json(TableDetailResponse {
         database,
         table,
@@ -480,6 +490,7 @@ async fn get_table_detail(
         data_columns,
         rows: data,
         sample_limit,
+        ddl,
     }))
 }
 
@@ -586,6 +597,8 @@ async fn open_pool(saved: &SavedConnection) -> Result<(MySqlPool, String), ApiEr
 
     let pool = MySqlPoolOptions::new()
         .max_connections(saved.max_connections.clamp(1, 20))
+        .min_connections(1)
+        .test_before_acquire(false)
         .connect_with(options)
         .await?;
     let server_version: (String,) = sqlx::query_as("SELECT VERSION()").fetch_one(&pool).await?;
@@ -593,14 +606,41 @@ async fn open_pool(saved: &SavedConnection) -> Result<(MySqlPool, String), ApiEr
 }
 
 fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnection, ApiError> {
-    let host = request.host.trim();
-    let username = request.username.trim();
-    let database = request
-        .database
+    let parsed_url = request
+        .connection_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .map(parse_mysql_connection_url)
+        .transpose()?;
+
+    let host = parsed_url
+        .as_ref()
+        .map(|connection| connection.host.as_str())
+        .unwrap_or_else(|| request.host.trim());
+    let username = parsed_url
+        .as_ref()
+        .map(|connection| connection.username.as_str())
+        .unwrap_or_else(|| request.username.trim());
+    let password = parsed_url
+        .as_ref()
+        .map(|connection| connection.password.clone())
+        .unwrap_or_else(|| request.password.clone());
+    let port = parsed_url
+        .as_ref()
+        .map(|connection| connection.port)
+        .unwrap_or(request.port);
+    let database = parsed_url
+        .as_ref()
+        .and_then(|connection| connection.database.clone())
+        .or_else(|| {
+            request
+                .database
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
 
     if host.is_empty() {
         return Err(ApiError::bad_request("host is required"));
@@ -622,20 +662,131 @@ fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnect
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{username}@{host}:{}", request.port));
+        .unwrap_or_else(|| format!("{username}@{host}:{port}"));
 
     Ok(SavedConnection {
         connection_id: Uuid::new_v4(),
         label,
         host: host.to_owned(),
-        port: request.port,
+        port,
         username: username.to_owned(),
-        password: request.password,
+        password,
         database_type,
         database,
         max_connections: request.max_connections.clamp(1, 20),
         last_server_version: None,
     })
+}
+
+struct ParsedConnectionUrl {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    database: Option<String>,
+}
+
+fn parse_mysql_connection_url(raw_url: &str) -> Result<ParsedConnectionUrl, ApiError> {
+    let url = if raw_url.starts_with("jdbc:mysql://") {
+        &raw_url[5..]
+    } else {
+        raw_url
+    };
+
+    let url = url::Url::parse(url)
+        .map_err(|error| ApiError::bad_request(format!("invalid MySQL connection URL: {error}")))?;
+
+    if url.scheme() != "mysql" {
+        return Err(ApiError::bad_request(
+            "connection URL must start with mysql:// or jdbc:mysql://",
+        ));
+    }
+
+    let host = url
+        .host_str()
+        .map(ToOwned::to_owned)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("connection URL host is required"))?;
+    let port = url.port().unwrap_or_else(default_mysql_port);
+    let username = if url.username().is_empty() {
+        query_value(&url, "user")
+            .or_else(|| query_value(&url, "username"))
+            .unwrap_or_default()
+    } else {
+        decode_url_component(url.username(), "username")?
+    };
+    if username.is_empty() {
+        return Err(ApiError::bad_request("connection URL username is required"));
+    }
+
+    let password = url
+        .password()
+        .map(|value| decode_url_component(value, "password"))
+        .transpose()?
+        .or_else(|| query_value(&url, "password"))
+        .or_else(|| query_value(&url, "passwd"))
+        .unwrap_or_default();
+
+    let database = url
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(|value| decode_url_component(value, "database"))
+        .transpose()?;
+
+    Ok(ParsedConnectionUrl {
+        host,
+        port,
+        username,
+        password,
+        database,
+    })
+}
+
+fn decode_url_component(value: &str, label: &str) -> Result<String, ApiError> {
+    percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .map_err(|error| ApiError::bad_request(format!("invalid URL-encoded {label}: {error}")))
+}
+
+fn query_value(url: &url::Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_mysql_connection_url_with_credentials_in_authority() {
+        let parsed = parse_mysql_connection_url("mysql://root:secret@127.0.0.1:3307/app_db")
+            .expect("connection URL should parse");
+
+        assert_eq!(parsed.host, "127.0.0.1");
+        assert_eq!(parsed.port, 3307);
+        assert_eq!(parsed.username, "root");
+        assert_eq!(parsed.password, "secret");
+        assert_eq!(parsed.database.as_deref(), Some("app_db"));
+    }
+
+    #[test]
+    fn parses_jdbc_connection_url_with_credentials_in_query() {
+        let parsed = parse_mysql_connection_url(
+            "jdbc:mysql://127.0.0.1:3306/app_db?user=root&password=secret",
+        )
+        .expect("JDBC connection URL should parse");
+
+        assert_eq!(parsed.host, "127.0.0.1");
+        assert_eq!(parsed.port, 3306);
+        assert_eq!(parsed.username, "root");
+        assert_eq!(parsed.password, "secret");
+        assert_eq!(parsed.database.as_deref(), Some("app_db"));
+    }
 }
 
 fn summary_from_saved(saved: &SavedConnection, connected: bool) -> ConnectionSummary {
@@ -726,6 +877,23 @@ fn returns_rows(sql: &str) -> bool {
         keyword.as_str(),
         "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "WITH"
     )
+}
+
+async fn show_create_table(
+    pool: &MySqlPool,
+    database: &str,
+    table: &str,
+) -> Result<String, ApiError> {
+    let sql = format!(
+        "SHOW CREATE TABLE {}.{}",
+        quote_identifier(database),
+        quote_identifier(table)
+    );
+    let row = sqlx::query(&sql).fetch_one(pool).await?;
+    let ddl: String = row
+        .try_get::<String, _>(1)
+        .map_err(|error| ApiError::internal(format!("failed to read CREATE TABLE statement: {error}")))?;
+    Ok(ddl)
 }
 
 fn quote_identifier(value: &str) -> String {

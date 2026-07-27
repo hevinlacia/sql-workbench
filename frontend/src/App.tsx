@@ -2,13 +2,16 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
+  ChevronLeft,
   ChevronRight,
+  Copy,
   Database,
   Loader2,
   Play,
   PlugZap,
   RefreshCw,
   Save,
+  Search,
   Server,
   X,
   Table2,
@@ -66,6 +69,7 @@ type TableDetailResponse = {
   data_columns: ColumnInfo[]
   rows: Array<Record<string, unknown>>
   sample_limit: number
+  ddl?: string | null
 }
 
 type RowsQueryResponse = {
@@ -85,8 +89,13 @@ type CommandQueryResponse = {
 
 type QueryResponse = RowsQueryResponse | CommandQueryResponse
 
+type ConnectionMode = 'fields' | 'url'
+type DetailTab = 'structure' | 'data' | 'sql'
+
 type ConnectForm = {
+  connectionMode: ConnectionMode
   label: string
+  connectionUrl: string
   host: string
   port: string
   username: string
@@ -97,7 +106,9 @@ type ConnectForm = {
 }
 
 const initialForm: ConnectForm = {
+  connectionMode: 'fields',
   label: 'Local MySQL',
+  connectionUrl: '',
   host: '127.0.0.1',
   port: '3306',
   username: 'root',
@@ -121,6 +132,7 @@ function App() {
   const [databasesByConnection, setDatabasesByConnection] = useState<Record<string, string[]>>({})
   const [tablesByDatabase, setTablesByDatabase] = useState<Record<string, TableInfo[]>>({})
   const [tableDetail, setTableDetail] = useState<TableDetailResponse | null>(null)
+  const [detailTab, setDetailTab] = useState<DetailTab>('data')
   const [sql, setSql] = useState(starterSql)
   const [maxRows, setMaxRows] = useState('500')
   const [queryResult, setQueryResult] = useState<QueryResponse | null>(null)
@@ -128,11 +140,15 @@ function App() {
   const [error, setError] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [connectionModalOpen, setConnectionModalOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem('sql-workbench-sidebar') !== 'expanded',
+  )
   const [loadingConnections, setLoadingConnections] = useState(false)
   const [loadingDatabases, setLoadingDatabases] = useState(false)
   const [loadingTablesKey, setLoadingTablesKey] = useState('')
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [querying, setQuerying] = useState(false)
+  const [tableFilter, setTableFilter] = useState('')
 
   const activeConnection = useMemo(
     () => connections.find((connection) => connection.connection_id === activeId) ?? null,
@@ -142,12 +158,25 @@ function App() {
   const activeDatabases = activeId ? (databasesByConnection[activeId] ?? []) : []
   const activeTablesKey = activeId && selectedDatabase ? dbKey(activeId, selectedDatabase) : ''
   const activeTables = activeTablesKey ? (tablesByDatabase[activeTablesKey] ?? []) : []
+  const filteredTables = useMemo(() => {
+    const keyword = tableFilter.trim().toLowerCase()
+    if (!keyword) return activeTables
+    return activeTables.filter((table) => table.name.toLowerCase().includes(keyword))
+  }, [activeTables, tableFilter])
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((current) => {
+      const next = !current
+      localStorage.setItem('sql-workbench-sidebar', next ? 'collapsed' : 'expanded')
+      return next
+    })
+  }
 
   useEffect(() => {
     void loadConnections()
   }, [])
 
-  const updateForm = (key: keyof ConnectForm, value: string) => {
+  const updateForm = <Key extends keyof ConnectForm>(key: Key, value: ConnectForm[Key]) => {
     setForm((current) => ({ ...current, [key]: value }))
   }
 
@@ -173,16 +202,18 @@ function App() {
     setError('')
     setMessage('')
     try {
+      const usingConnectionUrl = form.connectionMode === 'url'
       const response = await requestJson<ConnectionSummary>('/api/mysql/connections', {
         method: 'POST',
         body: JSON.stringify({
           label: form.label || undefined,
-          host: form.host,
-          port: Number(form.port || 3306),
-          username: form.username,
-          password: form.password,
+          connection_url: usingConnectionUrl ? form.connectionUrl : undefined,
+          host: usingConnectionUrl ? undefined : form.host,
+          port: usingConnectionUrl ? undefined : Number(form.port || 3306),
+          username: usingConnectionUrl ? undefined : form.username,
+          password: usingConnectionUrl ? undefined : form.password,
           database_type: form.databaseType,
-          database: form.database || undefined,
+          database: usingConnectionUrl ? undefined : form.database || undefined,
           max_connections: Number(form.max_connections || 5),
         }),
       })
@@ -222,6 +253,7 @@ function App() {
     setSelectedTable('')
     setTableDetail(null)
     setQueryResult(null)
+    setTableFilter('')
     await loadDatabases(connectionId)
   }
 
@@ -252,6 +284,7 @@ function App() {
     setSelectedTable('')
     setTableDetail(null)
     setQueryResult(null)
+    setTableFilter('')
     setSql(`SELECT *\nFROM \`${database}\`.\`your_table\`\nLIMIT 100;`)
     await loadTables(activeId, database)
   }
@@ -279,6 +312,7 @@ function App() {
     setQueryResult(null)
     setLoadingDetail(true)
     setError('')
+    setDetailTab('data')
     setSql(`SELECT *\nFROM \`${selectedDatabase}\`.\`${table}\`\nLIMIT 100;`)
     try {
       const response = await requestJson<TableDetailResponse>(
@@ -297,6 +331,7 @@ function App() {
       setError('Select a connection first.')
       return
     }
+    setDetailTab('sql')
     setQuerying(true)
     setError('')
     setMessage('')
@@ -319,20 +354,39 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon"><Database size={22} /></div>
-          <div>
-            <h1>SQL Workbench</h1>
-            <span>Saved MySQL browser</span>
+    <main className={`app-shell ${sidebarCollapsed ? 'collapsed' : ''}`}>
+      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+        {sidebarCollapsed ? (
+          <div className="sidebar-collapsed">
+            <button className="icon-button sidebar-toggle" onClick={toggleSidebar} title="Expand sidebar" aria-label="Expand sidebar">
+              <ChevronRight size={18} />
+            </button>
+            <button className="brand-icon" onClick={toggleSidebar} title="Expand sidebar" aria-label="Expand sidebar">
+              <Database size={22} />
+            </button>
+            <button className="icon-button sidebar-toggle" onClick={() => setConnectionModalOpen(true)} title="Add saved connection" aria-label="Add saved connection">
+              <Save size={18} />
+            </button>
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="brand">
+              <div className="brand-icon"><Database size={22} /></div>
+              <div>
+                <h1>SQL Workbench</h1>
+                <span>Saved MySQL browser</span>
+              </div>
+              <button className="icon-button sidebar-collapse" onClick={toggleSidebar} title="Collapse sidebar" aria-label="Collapse sidebar">
+                <ChevronLeft size={18} />
+              </button>
+            </div>
 
-        <button className="primary-button add-connection-button" onClick={() => setConnectionModalOpen(true)}>
-          <Save size={16} />
-          Add saved connection
-        </button>
+            <button className="primary-button add-connection-button" onClick={() => setConnectionModalOpen(true)}>
+              <Save size={16} />
+              Add saved connection
+            </button>
+          </>
+        )}
       </aside>
 
       <section className="workspace">
@@ -406,7 +460,19 @@ function App() {
                               {loadingTablesKey === dbKey(activeId, database) && (
                                 <div className="loading-line"><Loader2 className="spin" size={14} /> Loading tables</div>
                               )}
-                              {activeTables.map((table) => (
+                              {activeTables.length > 0 && (
+                                <div className="table-filter">
+                                  <Search size={13} />
+                                  <input
+                                    type="search"
+                                    value={tableFilter}
+                                    onChange={(event) => setTableFilter(event.target.value)}
+                                    placeholder="Filter tables"
+                                    spellCheck={false}
+                                  />
+                                </div>
+                              )}
+                              {filteredTables.map((table) => (
                                 <button
                                   key={table.name}
                                   className={`tree-row table-row ${table.name === selectedTable ? 'active' : ''}`}
@@ -418,6 +484,9 @@ function App() {
                                   <span className="tree-sub">{formatRows(table.table_rows)}</span>
                                 </button>
                               ))}
+                              {activeTables.length > 0 && filteredTables.length === 0 && (
+                                <div className="empty-state table-filter-empty">No tables match &ldquo;{tableFilter}&rdquo;</div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -449,31 +518,49 @@ function App() {
                       <RefreshCw size={16} /> Reload
                     </button>
                   </div>
-                  <h4>Structure</h4>
-                  <StructureTable columns={tableDetail.columns} />
-                  <h4>Data</h4>
-                  <RowsTable columns={tableDetail.data_columns} rows={tableDetail.rows} />
-                </div>
-              )}
-            </section>
 
-            <section className="panel editor-panel">
-              <div className="panel-title space-between">
-                <span><TerminalSquare size={16} /> SQL editor</span>
-                <button className="primary-button compact" onClick={executeSql} disabled={!activeId || querying}>
-                  {querying ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
-                  Run
-                </button>
-              </div>
-              <textarea value={sql} onChange={(event) => setSql(event.target.value)} spellCheck={false} />
-              {queryResult?.kind === 'command' && (
-                <div className="command-result inline">
-                  <strong>{queryResult.rows_affected}</strong>
-                  <span>rows affected in {queryResult.duration_ms} ms</span>
+                  <div className="detail-tabs" role="tablist" aria-label="Table detail views">
+                    <button className={detailTab === 'structure' ? 'active' : ''} onClick={() => setDetailTab('structure')} role="tab" aria-selected={detailTab === 'structure'}>
+                      <Table2 size={14} /> Structure
+                    </button>
+                    <button className={detailTab === 'data' ? 'active' : ''} onClick={() => setDetailTab('data')} role="tab" aria-selected={detailTab === 'data'}>
+                      <Database size={14} /> Data
+                    </button>
+                    <button className={detailTab === 'sql' ? 'active' : ''} onClick={() => setDetailTab('sql')} role="tab" aria-selected={detailTab === 'sql'}>
+                      <TerminalSquare size={14} /> SQL
+                    </button>
+                  </div>
+
+                  <div className="detail-tab-body">
+                    {detailTab === 'structure' && (
+                      <div className="structure-tab">
+                        <StructureTable columns={tableDetail.columns} />
+                        <DdlBlock ddl={tableDetail.ddl} />
+                      </div>
+                    )}
+                    {detailTab === 'data' && <RowsTable columns={tableDetail.data_columns} rows={tableDetail.rows} sortable fill />}
+                    {detailTab === 'sql' && (
+                      <div className="sql-tab">
+                        <textarea value={sql} onChange={(event) => setSql(event.target.value)} spellCheck={false} />
+                        <div className="sql-tab-actions">
+                          <button className="primary-button compact" onClick={executeSql} disabled={!activeId || querying}>
+                            {querying ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
+                            Run
+                          </button>
+                        </div>
+                        {queryResult?.kind === 'command' && (
+                          <div className="command-result inline">
+                            <strong>{queryResult.rows_affected}</strong>
+                            <span>rows affected in {queryResult.duration_ms} ms</span>
+                          </div>
+                        )}
+                        {queryResult?.kind === 'rows' && (
+                          <RowsTable columns={queryResult.columns} rows={queryResult.rows} meta={`${queryResult.row_count} rows · ${queryResult.duration_ms} ms${queryResult.limited ? ' · limited' : ''}`} sortable />
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              )}
-              {queryResult?.kind === 'rows' && (
-                <RowsTable columns={queryResult.columns} rows={queryResult.rows} meta={`${queryResult.row_count} rows · ${queryResult.duration_ms} ms${queryResult.limited ? ' · limited' : ''}`} />
               )}
             </section>
           </section>
@@ -508,6 +595,23 @@ function App() {
                 void createConnection()
               }}
             >
+              <div className="connection-mode-toggle" role="tablist" aria-label="Connection input mode">
+                <button
+                  type="button"
+                  className={form.connectionMode === 'fields' ? 'active' : ''}
+                  onClick={() => updateForm('connectionMode', 'fields')}
+                >
+                  Fields
+                </button>
+                <button
+                  type="button"
+                  className={form.connectionMode === 'url' ? 'active' : ''}
+                  onClick={() => updateForm('connectionMode', 'url')}
+                >
+                  URL
+                </button>
+              </div>
+
               <div className="field-grid">
                 <label>
                   Label
@@ -519,35 +623,57 @@ function App() {
                     <option value="mysql">MySQL</option>
                   </select>
                 </label>
-                <label>
-                  Host
-                  <input value={form.host} onChange={(event) => updateForm('host', event.target.value)} />
-                </label>
-                <label>
-                  Port
-                  <input value={form.port} onChange={(event) => updateForm('port', event.target.value)} />
-                </label>
-                <label>
-                  User
-                  <input value={form.username} onChange={(event) => updateForm('username', event.target.value)} />
-                </label>
-                <label>
-                  Password
-                  <input
-                    value={form.password}
-                    onChange={(event) => updateForm('password', event.target.value)}
-                    type="password"
-                    autoComplete="current-password"
-                  />
-                </label>
-                <label>
-                  Default DB
-                  <input
-                    value={form.database}
-                    onChange={(event) => updateForm('database', event.target.value)}
-                    placeholder="optional"
-                  />
-                </label>
+
+                {form.connectionMode === 'url' ? (
+                  <>
+                    <label className="full-span">
+                      Connection URL
+                      <textarea
+                        className="connection-url-input"
+                        value={form.connectionUrl}
+                        onChange={(event) => updateForm('connectionUrl', event.target.value)}
+                        placeholder="mysql://root:password@127.0.0.1:3306/app_db"
+                        required
+                        spellCheck={false}
+                      />
+                    </label>
+                    <p className="form-hint full-span">
+                      Supports mysql://user:password@host:port/db and jdbc:mysql://host:port/db?user=root&amp;password=secret.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <label>
+                      Host
+                      <input value={form.host} onChange={(event) => updateForm('host', event.target.value)} />
+                    </label>
+                    <label>
+                      Port
+                      <input value={form.port} onChange={(event) => updateForm('port', event.target.value)} />
+                    </label>
+                    <label>
+                      User
+                      <input value={form.username} onChange={(event) => updateForm('username', event.target.value)} />
+                    </label>
+                    <label>
+                      Password
+                      <input
+                        value={form.password}
+                        onChange={(event) => updateForm('password', event.target.value)}
+                        type="password"
+                        autoComplete="current-password"
+                      />
+                    </label>
+                    <label>
+                      Default DB
+                      <input
+                        value={form.database}
+                        onChange={(event) => updateForm('database', event.target.value)}
+                        placeholder="optional"
+                      />
+                    </label>
+                  </>
+                )}
               </div>
 
               <div className="modal-actions">
@@ -567,9 +693,9 @@ function App() {
   )
 }
 
-function StructureTable({ columns }: { columns: TableColumn[] }) {
+function StructureTable({ columns, fill = false }: { columns: TableColumn[]; fill?: boolean }) {
   return (
-    <div className="table-wrap small">
+    <div className={`table-wrap small ${fill ? 'fill' : ''}`}>
       <table>
         <thead>
           <tr>
@@ -600,13 +726,89 @@ function StructureTable({ columns }: { columns: TableColumn[] }) {
   )
 }
 
-function RowsTable({ columns, rows, meta }: { columns: ColumnInfo[]; rows: Array<Record<string, unknown>>; meta?: string }) {
-  const displayColumns = columns.length
-    ? columns
-    : Object.keys(rows[0] ?? {}).map((name) => ({ name, type_name: 'unknown' }))
+function DdlBlock({ ddl }: { ddl?: string | null }) {
+  const [copied, setCopied] = useState(false)
+
+  const copy = async () => {
+    if (!ddl) return
+    try {
+      await navigator.clipboard.writeText(ddl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
 
   return (
-    <div className="table-wrap">
+    <div className="ddl-block">
+      <div className="ddl-header">
+        <h4>Create Table</h4>
+        {ddl && (
+          <button className="secondary-button compact" type="button" onClick={copy}>
+            <Copy size={14} /> {copied ? 'Copied' : 'Copy'}
+          </button>
+        )}
+      </div>
+      {ddl ? (
+        <pre className="ddl-pre"><code>{ddl}</code></pre>
+      ) : (
+        <div className="empty-results">DDL not available</div>
+      )}
+    </div>
+  )
+}
+
+type SortDirection = 'asc' | 'desc'
+
+type SortState = {
+  column: string
+  direction: SortDirection
+} | null
+
+function RowsTable({
+  columns,
+  rows,
+  meta,
+  sortable = false,
+  fill = false,
+}: {
+  columns: ColumnInfo[]
+  rows: Array<Record<string, unknown>>
+  meta?: string
+  sortable?: boolean
+  fill?: boolean
+}) {
+  const [sortState, setSortState] = useState<SortState>(null)
+  const displayColumns = useMemo(
+    () => (columns.length ? columns : Object.keys(rows[0] ?? {}).map((name) => ({ name, type_name: 'unknown' }))),
+    [columns, rows],
+  )
+  const sortedRows = useMemo(() => {
+    if (!sortState || !displayColumns.some((column) => column.name === sortState.column)) {
+      return rows
+    }
+
+    const directionMultiplier = sortState.direction === 'asc' ? 1 : -1
+    return rows
+      .map((row, index) => ({ row, index }))
+      .sort((left, right) => {
+        const comparison = compareCellValues(left.row[sortState.column], right.row[sortState.column])
+        return comparison === 0 ? left.index - right.index : comparison * directionMultiplier
+      })
+      .map(({ row }) => row)
+  }, [displayColumns, rows, sortState])
+
+  const toggleSort = (columnName: string) => {
+    setSortState((current) => {
+      if (!current || current.column !== columnName) return { column: columnName, direction: 'asc' }
+      if (current.direction === 'asc') return { column: columnName, direction: 'desc' }
+      return null
+    })
+  }
+
+  return (
+    <div className={`table-wrap ${fill ? 'fill' : ''}`}>
       {meta && <div className="result-meta"><span>{meta}</span></div>}
       {rows.length === 0 ? (
         <div className="empty-results">No rows</div>
@@ -614,16 +816,32 @@ function RowsTable({ columns, rows, meta }: { columns: ColumnInfo[]; rows: Array
         <table>
           <thead>
             <tr>
-              {displayColumns.map((column) => (
-                <th key={column.name} title={column.type_name}>
-                  <span>{column.name}</span>
-                  <small>{column.type_name}</small>
-                </th>
-              ))}
+              {displayColumns.map((column) => {
+                const activeDirection = sortState?.column === column.name ? sortState.direction : null
+                return (
+                  <th key={column.name} title={column.type_name}>
+                    <div className="th-content">
+                      <span>{column.name}</span>
+                      {sortable && (
+                        <button
+                          className={`sort-button ${activeDirection ? 'active' : ''}`}
+                          type="button"
+                          onClick={() => toggleSort(column.name)}
+                          title="Toggle sort: default → ascending → descending"
+                          aria-label={`Toggle sort for ${column.name}`}
+                        >
+                          {activeDirection === 'asc' ? '↑' : activeDirection === 'desc' ? '↓' : '↕'}
+                        </button>
+                      )}
+                    </div>
+                    <small>{column.type_name}</small>
+                  </th>
+                )
+              })}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, rowIndex) => (
+            {sortedRows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {displayColumns.map((column) => (
                   <td key={column.name}>{formatCell(row[column.name])}</td>
@@ -675,6 +893,25 @@ function formatRows(value?: number | null) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
   return String(value)
+}
+
+function compareCellValues(left: unknown, right: unknown) {
+  if (left === right) return 0
+  if (left === null || left === undefined) return 1
+  if (right === null || right === undefined) return -1
+
+  if (typeof left === 'number' && typeof right === 'number') return left - right
+  if (typeof left === 'boolean' && typeof right === 'boolean') return Number(left) - Number(right)
+
+  const leftDate = typeof left === 'string' ? Date.parse(left) : Number.NaN
+  const rightDate = typeof right === 'string' ? Date.parse(right) : Number.NaN
+  if (!Number.isNaN(leftDate) && !Number.isNaN(rightDate)) return leftDate - rightDate
+
+  const leftNumber = typeof left === 'string' && left.trim() !== '' ? Number(left) : Number.NaN
+  const rightNumber = typeof right === 'string' && right.trim() !== '' ? Number(right) : Number.NaN
+  if (!Number.isNaN(leftNumber) && !Number.isNaN(rightNumber)) return leftNumber - rightNumber
+
+  return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' })
 }
 
 function formatCell(value: unknown) {
