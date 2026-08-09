@@ -136,6 +136,179 @@ button:disabled {
   margin-top: 16px;
 }
 
+.add-connection-button.list-top {
+  margin-top: 0;
+}
+
+.sidebar-connections {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  min-height: 0;
+}
+
+.sidebar-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sidebar-section-title span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sidebar-connection-list {
+  display: grid;
+  gap: 8px;
+  max-height: calc(100vh - 198px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.sidebar-connection-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: stretch;
+  gap: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 13px;
+  background: rgba(2, 6, 23, 0.35);
+  padding: 7px;
+}
+
+.sidebar-connection-row:hover,
+.sidebar-connection-row.active {
+  border-color: rgba(45, 212, 191, 0.52);
+  background: rgba(13, 148, 136, 0.14);
+}
+
+.sidebar-connection-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.sidebar-connection-text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.sidebar-connection-name,
+.sidebar-connection-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-connection-name {
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.sidebar-connection-subtitle {
+  color: #91a4c7;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sidebar-delete {
+  align-self: center;
+  opacity: 0.7;
+}
+
+.sidebar-delete:hover {
+  opacity: 1;
+}
+
+.sidebar-empty {
+  padding: 10px 2px;
+}
+
+.sidebar-settings {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.sidebar-settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.35);
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  padding: 0 12px;
+  text-transform: uppercase;
+}
+
+.sidebar-settings-toggle span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sidebar-settings-toggle svg.open {
+  transform: rotate(90deg);
+}
+
+.sidebar-settings-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 13px;
+  background: rgba(2, 6, 23, 0.28);
+  padding: 12px;
+}
+
+.sidebar-settings-panel .form-hint {
+  margin: 0;
+}
+
+.sidebar-section-toggle {
+  cursor: pointer;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 2px 0;
+  text-align: left;
+}
+
+.sidebar-section-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.sidebar-section-toggle svg.open {
+  transform: rotate(90deg);
+}
+
+.sidebar-settings-toggle.active {
+  border-color: rgba(45, 212, 191, 0.52);
+  background: rgba(13, 148, 136, 0.18);
+  color: #ccfbf1;
+}
+
 .panel-title {
   display: flex;
   align-items: center;
@@ -329,6 +502,66 @@ textarea:focus {
   border: 1px solid rgba(248, 113, 113, 0.32);
   background: rgba(190, 18, 60, 0.18);
   color: #fecdd3;
+}
+
+.settings-page {
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.68);
+}
+
+.settings-header .eyebrow {
+  margin-bottom: 2px;
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.settings-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-section {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.settings-section h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.settings-section .form-hint {
+  margin: 0;
+}
+
+.settings-section .modal-form {
+  margin-top: 2px;
 }
 
 .browser-grid {
@@ -682,6 +915,69 @@ textarea:focus {
   background: rgba(2, 6, 23, 0.72);
   font-size: 12px;
   font-weight: 800;
+}
+
+/*
+ * Split result table: frozen header + horizontal scrollbar proxy + scrolling body.
+ * The proxy sits between the header and the first data row so the horizontal
+ * scrollbar is always reachable without scrolling to the bottom of the table.
+ * Header and body are separate tables that share a measured <colgroup>; both are
+ * translated together by the proxy. scrollbar-gutter: stable keeps the header,
+ * proxy and body content boxes the same width so columns stay aligned.
+ */
+.rows-split {
+  display: flex;
+  flex-direction: column;
+  max-height: 42vh;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.rows-split.fill {
+  max-height: none;
+  height: 100%;
+  min-height: 0;
+}
+
+.rows-split .result-meta {
+  position: static;
+  flex: 0 0 auto;
+}
+
+.rows-header-region {
+  flex: 0 0 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.rows-header-region th {
+  position: static;
+}
+
+.rows-hscroll {
+  flex: 0 0 auto;
+  min-height: 14px;
+  overflow-x: auto;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.5);
+}
+
+.rows-hscroll-spacer {
+  height: 1px;
+}
+
+.rows-body-region {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 table {

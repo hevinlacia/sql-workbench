@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -10,10 +10,9 @@ import {
   Play,
   PlugZap,
   RefreshCw,
-  Save,
   Search,
   Server,
-  X,
+  Settings,
   Table2,
   TerminalSquare,
   Trash2,
@@ -27,6 +26,8 @@ type ConnectionSummary = {
   username: string
   database_type: string
   database?: string | null
+  archery_env?: string | null
+  archery_db_name?: string | null
   server_version?: string | null
   connected: boolean
 }
@@ -89,7 +90,7 @@ type CommandQueryResponse = {
 
 type QueryResponse = RowsQueryResponse | CommandQueryResponse
 
-type ConnectionMode = 'fields' | 'url'
+type ConnectionMode = 'fields' | 'url' | 'archery'
 type DetailTab = 'structure' | 'data' | 'sql'
 
 type ConnectForm = {
@@ -102,6 +103,8 @@ type ConnectForm = {
   password: string
   databaseType: string
   database: string
+  archeryEnv: string
+  archeryDbName: string
   max_connections: string
 }
 
@@ -115,6 +118,8 @@ const initialForm: ConnectForm = {
   password: '',
   databaseType: 'mysql',
   database: '',
+  archeryEnv: 'uat-cn',
+  archeryDbName: 'wms',
   max_connections: '5',
 }
 
@@ -122,6 +127,20 @@ const starterSql = `SELECT
   DATABASE() AS current_database,
   VERSION() AS mysql_version,
   NOW() AS server_time;`
+
+const archeryStarterSql = `SELECT
+  NOW() AS server_time,
+  DATABASE() AS current_database;
+
+-- WMS Archery uses camelCase columns, e.g. warehouseCode / leadingSts.
+-- Add LIMIT for safer UAT/PRO exploration.`
+
+const archeryEnvironmentLabels: Record<string, string> = {
+  'uat-cn': 'UAT CN · cwh-uat-wms-polarx',
+  'uat-sea': 'UAT SEA · cwhsea-uat-wms-polarx',
+  'pro-cn': 'PRO CN · pro-cwh-wms-mysql',
+  'pro-sea': 'PRO SEA · cwhsea-pro-wms-mysql',
+}
 
 function App() {
   const [form, setForm] = useState<ConnectForm>(initialForm)
@@ -139,7 +158,12 @@ function App() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [connecting, setConnecting] = useState(false)
-  const [connectionModalOpen, setConnectionModalOpen] = useState(false)
+  const [view, setView] = useState<'workspace' | 'settings'>('workspace')
+  const [connectionsCollapsed, setConnectionsCollapsed] = useState<boolean>(
+    () => localStorage.getItem('sql-workbench-connections-collapsed') === '1',
+  )
+  const [cacheTtlMinutes, setCacheTtlMinutes] = useState(() => localStorage.getItem('sql-workbench-cache-ttl-minutes') || '60')
+  const [sampleLimit, setSampleLimit] = useState(() => localStorage.getItem('sql-workbench-sample-limit') || '50')
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
     () => localStorage.getItem('sql-workbench-sidebar') !== 'expanded',
   )
@@ -180,6 +204,36 @@ function App() {
     setForm((current) => ({ ...current, [key]: value }))
   }
 
+  const cacheQuery = (refresh = false, sampleLimitOverride?: number) => {
+    const ttl = Number(cacheTtlMinutes || 60)
+    const params = new URLSearchParams()
+    if (refresh) params.set('refresh', '1')
+    if (Number.isFinite(ttl) && ttl > 0) params.set('cache_ttl_minutes', String(Math.round(ttl)))
+    if (sampleLimitOverride !== undefined && Number.isFinite(sampleLimitOverride) && sampleLimitOverride > 0) {
+      params.set('sample_limit', String(Math.round(sampleLimitOverride)))
+    }
+    const text = params.toString()
+    return text ? `?${text}` : ''
+  }
+
+  const updateCacheTtlMinutes = (value: string) => {
+    setCacheTtlMinutes(value)
+    localStorage.setItem('sql-workbench-cache-ttl-minutes', value)
+  }
+
+  const updateSampleLimit = (value: string) => {
+    setSampleLimit(value)
+    localStorage.setItem('sql-workbench-sample-limit', value)
+  }
+
+  const toggleConnectionsCollapsed = () => {
+    setConnectionsCollapsed((current) => {
+      const next = !current
+      localStorage.setItem('sql-workbench-connections-collapsed', next ? '1' : '0')
+      return next
+    })
+  }
+
   async function loadConnections() {
     setLoadingConnections(true)
     setError('')
@@ -203,24 +257,27 @@ function App() {
     setMessage('')
     try {
       const usingConnectionUrl = form.connectionMode === 'url'
+      const usingArchery = form.connectionMode === 'archery'
       const response = await requestJson<ConnectionSummary>('/api/mysql/connections', {
         method: 'POST',
         body: JSON.stringify({
           label: form.label || undefined,
           connection_url: usingConnectionUrl ? form.connectionUrl : undefined,
-          host: usingConnectionUrl ? undefined : form.host,
-          port: usingConnectionUrl ? undefined : Number(form.port || 3306),
-          username: usingConnectionUrl ? undefined : form.username,
-          password: usingConnectionUrl ? undefined : form.password,
-          database_type: form.databaseType,
-          database: usingConnectionUrl ? undefined : form.database || undefined,
-          max_connections: Number(form.max_connections || 5),
+          host: usingConnectionUrl || usingArchery ? undefined : form.host,
+          port: usingConnectionUrl || usingArchery ? undefined : Number(form.port || 3306),
+          username: usingConnectionUrl || usingArchery ? undefined : form.username,
+          password: usingConnectionUrl || usingArchery ? undefined : form.password,
+          database_type: usingArchery ? 'archery' : form.databaseType,
+          database: usingConnectionUrl ? undefined : usingArchery ? form.archeryDbName || 'wms' : form.database || undefined,
+          archery_env: usingArchery ? form.archeryEnv : undefined,
+          archery_db_name: usingArchery ? form.archeryDbName || 'wms' : undefined,
+          max_connections: usingArchery ? 1 : Number(form.max_connections || 5),
         }),
       })
       setConnections((current) => [response, ...current.filter((item) => item.connection_id !== response.connection_id)])
       setMessage(`Saved and connected: ${response.label}`)
-      await selectConnection(response.connection_id)
-      setConnectionModalOpen(false)
+      await selectConnection(response.connection_id, response)
+      setView('workspace')
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -247,18 +304,28 @@ function App() {
     }
   }
 
-  async function selectConnection(connectionId: string) {
+  async function selectConnection(connectionId: string, knownConnection?: ConnectionSummary) {
+    const connection = knownConnection ?? connections.find((item) => item.connection_id === connectionId) ?? null
     setActiveId(connectionId)
     setSelectedDatabase('')
     setSelectedTable('')
     setTableDetail(null)
     setQueryResult(null)
     setTableFilter('')
-    await loadDatabases(connectionId)
+    setDetailTab('data')
+    if (connection?.database_type === 'archery') {
+      setSql(archeryStarterSql)
+    }
+    const databases = await loadDatabases(connectionId)
+    if (connection?.database_type === 'archery' && databases[0]) {
+      setSelectedDatabase(databases[0])
+      setSql(`SELECT *\nFROM \`${databases[0]}\`.\`your_table\`\nLIMIT 100;`)
+      await loadTables(connectionId, databases[0])
+    }
   }
 
-  async function loadDatabases(connectionId = activeId) {
-    if (!connectionId) return
+  async function loadDatabases(connectionId = activeId): Promise<string[]> {
+    if (!connectionId) return []
     setLoadingDatabases(true)
     setError('')
     try {
@@ -271,8 +338,10 @@ function App() {
           connection.connection_id === connectionId ? { ...connection, connected: true } : connection,
         ),
       )
+      return response.databases
     } catch (cause) {
       setError(errorMessage(cause))
+      return []
     } finally {
       setLoadingDatabases(false)
     }
@@ -285,18 +354,23 @@ function App() {
     setTableDetail(null)
     setQueryResult(null)
     setTableFilter('')
+    if (activeConnection?.database_type === 'archery') {
+      setDetailTab('data')
+      setSql(`SELECT *\nFROM \`${database}\`.\`your_table\`\nLIMIT 100;`)
+      await loadTables(activeId, database)
+      return
+    }
     setSql(`SELECT *\nFROM \`${database}\`.\`your_table\`\nLIMIT 100;`)
     await loadTables(activeId, database)
   }
 
-  async function loadTables(connectionId: string, database: string) {
+  async function loadTables(connectionId: string, database: string, refresh = false) {
     const key = dbKey(connectionId, database)
     setLoadingTablesKey(key)
     setError('')
     try {
-      const response = await requestJson<TablesResponse>(
-        `/api/mysql/connections/${connectionId}/databases/${encodeURIComponent(database)}/tables`,
-      )
+      const path = `/api/mysql/connections/${connectionId}/databases/${encodeURIComponent(database)}/tables${cacheQuery(refresh)}`
+      const response = await requestJson<TablesResponse>(path)
       setTablesByDatabase((current) => ({ ...current, [key]: response.tables }))
     } catch (cause) {
       setError(errorMessage(cause))
@@ -305,7 +379,7 @@ function App() {
     }
   }
 
-  async function selectTable(table: string) {
+  async function selectTable(table: string, refresh = false) {
     if (!activeId || !selectedDatabase) return
     setSelectedTable(table)
     setTableDetail(null)
@@ -313,17 +387,28 @@ function App() {
     setLoadingDetail(true)
     setError('')
     setDetailTab('data')
-    setSql(`SELECT *\nFROM \`${selectedDatabase}\`.\`${table}\`\nLIMIT 100;`)
+    setSql(`SELECT *\nFROM \`${selectedDatabase}\`.\`${table}\`\nLIMIT ${sampleLimit || 50};`)
     try {
-      const response = await requestJson<TableDetailResponse>(
-        `/api/mysql/connections/${activeId}/databases/${encodeURIComponent(selectedDatabase)}/tables/${encodeURIComponent(table)}`,
-      )
+      const path = `/api/mysql/connections/${activeId}/databases/${encodeURIComponent(selectedDatabase)}/tables/${encodeURIComponent(table)}${cacheQuery(refresh, Number(sampleLimit || 50))}`
+      const response = await requestJson<TableDetailResponse>(path)
       setTableDetail(response)
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
       setLoadingDetail(false)
     }
+  }
+
+  async function refreshCurrentView() {
+    setMessage('')
+    await loadConnections()
+    if (activeId && selectedDatabase) {
+      await loadTables(activeId, selectedDatabase, true)
+    }
+    if (selectedTable) {
+      await selectTable(selectedTable, true)
+    }
+    setMessage(selectedDatabase || selectedTable ? 'Refreshed latest data.' : 'Connections refreshed.')
   }
 
   async function executeSql() {
@@ -364,8 +449,8 @@ function App() {
             <button className="brand-icon" onClick={toggleSidebar} title="Expand sidebar" aria-label="Expand sidebar">
               <Database size={22} />
             </button>
-            <button className="icon-button sidebar-toggle" onClick={() => setConnectionModalOpen(true)} title="Add saved connection" aria-label="Add saved connection">
-              <Save size={18} />
+            <button className="icon-button sidebar-toggle" onClick={() => setView('settings')} title="Open settings" aria-label="Open settings">
+              <Settings size={18} />
             </button>
           </div>
         ) : (
@@ -381,24 +466,80 @@ function App() {
               </button>
             </div>
 
-            <button className="primary-button add-connection-button" onClick={() => setConnectionModalOpen(true)}>
-              <Save size={16} />
-              Add saved connection
-            </button>
+            <section className="sidebar-connections" aria-label="Saved database connections">
+              <button
+                className="sidebar-section-title sidebar-section-toggle"
+                type="button"
+                onClick={toggleConnectionsCollapsed}
+                aria-expanded={!connectionsCollapsed}
+              >
+                <span><Server size={14} /> Saved connections</span>
+                {loadingConnections ? <Loader2 className="spin" size={14} /> : <ChevronRight size={14} className={connectionsCollapsed ? '' : 'open'} />}
+              </button>
+              {!connectionsCollapsed && (
+                <div className="sidebar-connection-list">
+                  {connections.length === 0 && <div className="empty-state sidebar-empty">No saved connections yet</div>}
+                  {connections.map((connection) => (
+                    <div className={`sidebar-connection-row ${connection.connection_id === activeId ? 'active' : ''}`} key={connection.connection_id}>
+                      <button
+                        className="sidebar-connection-card"
+                        onClick={() => void selectConnection(connection.connection_id)}
+                        title={connectionSubtitle(connection)}
+                      >
+                        <span className={`status-dot ${connection.connected ? 'connected' : ''}`} />
+                        <span className="sidebar-connection-text">
+                          <span className="sidebar-connection-name">{connection.label}</span>
+                          <span className="sidebar-connection-subtitle">{connectionSubtitle(connection)}</span>
+                        </span>
+                      </button>
+                      <button className="delete-mini sidebar-delete" title="Delete saved connection" onClick={() => void deleteConnection(connection.connection_id)}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="sidebar-settings" aria-label="Settings">
+              <button
+                className={`sidebar-settings-toggle ${view === 'settings' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setView('settings')}
+              >
+                <span><Settings size={14} /> Settings</span>
+                <ChevronRight size={14} />
+              </button>
+            </section>
           </>
         )}
       </aside>
 
       <section className="workspace">
+        {view === 'settings' ? (
+          <SettingsPage
+            onBack={() => setView('workspace')}
+            cacheTtlMinutes={cacheTtlMinutes}
+            updateCacheTtlMinutes={updateCacheTtlMinutes}
+            sampleLimit={sampleLimit}
+            updateSampleLimit={updateSampleLimit}
+            form={form}
+            updateForm={updateForm}
+            connecting={connecting}
+            createConnection={createConnection}
+            error={error}
+            message={message}
+          />
+        ) : (
+          <>
         <header className="topbar">
           <div>
             <p className="eyebrow">Database explorer</p>
             <h2>{activeConnection ? activeConnection.label : 'No connection selected'}</h2>
             {activeConnection && (
               <span className="muted">
-                {activeConnection.username}@{activeConnection.host}:{activeConnection.port}
-                {activeConnection.database ? ` / ${activeConnection.database}` : ''}
-                {activeConnection.server_version ? ` · MySQL ${activeConnection.server_version}` : ''}
+                {connectionSubtitle(activeConnection)}
+                {activeConnection.server_version ? ` · ${activeConnection.server_version}` : ''}
               </span>
             )}
           </div>
@@ -407,7 +548,7 @@ function App() {
               Max rows
               <input value={maxRows} onChange={(event) => setMaxRows(event.target.value)} />
             </label>
-            <button className="secondary-button" onClick={loadConnections}>
+            <button className="secondary-button" onClick={() => void refreshCurrentView()}>
               {loadingConnections ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
               Refresh
             </button>
@@ -424,73 +565,53 @@ function App() {
         <div className="browser-grid">
           <section className="panel tree-panel">
             <div className="panel-title space-between">
-              <span><Server size={16} /> Connections</span>
-              {loadingConnections && <Loader2 className="spin" size={15} />}
+              <span><Database size={16} /> Databases & tables</span>
+              {loadingDatabases && <Loader2 className="spin" size={15} />}
             </div>
             <div className="tree-list">
-              {connections.length === 0 && <div className="empty-state">No saved connections</div>}
-              {connections.map((connection) => (
-                <div className="tree-group" key={connection.connection_id}>
-                  <div className={`tree-row connection-row ${connection.connection_id === activeId ? 'active' : ''}`}>
-                    <button onClick={() => void selectConnection(connection.connection_id)}>
-                      <ChevronRight size={14} className={connection.connection_id === activeId ? 'open' : ''} />
-                      <span className={`status-dot ${connection.connected ? 'connected' : ''}`} />
-                      <span className="tree-main">{connection.label}</span>
-                      <span className="tree-sub">{connection.host}:{connection.port}</span>
-                    </button>
-                    <button className="delete-mini" title="Delete saved connection" onClick={() => void deleteConnection(connection.connection_id)}>
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-
-                  {connection.connection_id === activeId && (
-                    <div className="tree-children">
-                      {loadingDatabases && <div className="loading-line"><Loader2 className="spin" size={14} /> Loading databases</div>}
-                      {activeDatabases.map((database) => (
-                        <div key={database}>
-                          <button
-                            className={`tree-row db-row ${database === selectedDatabase ? 'active' : ''}`}
-                            onClick={() => void selectDatabase(database)}
-                          >
-                            <Database size={14} />
-                            <span className="tree-main">{database}</span>
-                          </button>
-                          {database === selectedDatabase && (
-                            <div className="table-children">
-                              {loadingTablesKey === dbKey(activeId, database) && (
-                                <div className="loading-line"><Loader2 className="spin" size={14} /> Loading tables</div>
-                              )}
-                              {activeTables.length > 0 && (
-                                <div className="table-filter">
-                                  <Search size={13} />
-                                  <input
-                                    type="search"
-                                    value={tableFilter}
-                                    onChange={(event) => setTableFilter(event.target.value)}
-                                    placeholder="Filter tables"
-                                    spellCheck={false}
-                                  />
-                                </div>
-                              )}
-                              {filteredTables.map((table) => (
-                                <button
-                                  key={table.name}
-                                  className={`tree-row table-row ${table.name === selectedTable ? 'active' : ''}`}
-                                  onClick={() => void selectTable(table.name)}
-                                  title={table.comment || table.table_type}
-                                >
-                                  <Table2 size={14} />
-                                  <span className="tree-main">{table.name}</span>
-                                  <span className="tree-sub">{formatRows(table.table_rows)}</span>
-                                </button>
-                              ))}
-                              {activeTables.length > 0 && filteredTables.length === 0 && (
-                                <div className="empty-state table-filter-empty">No tables match &ldquo;{tableFilter}&rdquo;</div>
-                              )}
-                            </div>
-                          )}
+              {!activeConnection && <div className="empty-state">Select a saved connection from the left sidebar.</div>}
+              {activeConnection && activeDatabases.length === 0 && !loadingDatabases && <div className="empty-state">No databases loaded</div>}
+              {activeConnection && activeDatabases.map((database) => (
+                <div key={database}>
+                  <button
+                    className={`tree-row db-row ${database === selectedDatabase ? 'active' : ''}`}
+                    onClick={() => void selectDatabase(database)}
+                  >
+                    <Database size={14} />
+                    <span className="tree-main">{database}</span>
+                  </button>
+                  {database === selectedDatabase && (
+                    <div className="table-children">
+                      {loadingTablesKey === dbKey(activeId, database) && (
+                        <div className="loading-line"><Loader2 className="spin" size={14} /> Loading tables</div>
+                      )}
+                      {activeTables.length > 0 && (
+                        <div className="table-filter">
+                          <Search size={13} />
+                          <input
+                            type="search"
+                            value={tableFilter}
+                            onChange={(event) => setTableFilter(event.target.value)}
+                            placeholder="Filter tables"
+                            spellCheck={false}
+                          />
                         </div>
+                      )}
+                      {filteredTables.map((table) => (
+                        <button
+                          key={table.name}
+                          className={`tree-row table-row ${table.name === selectedTable ? 'active' : ''}`}
+                          onClick={() => void selectTable(table.name)}
+                          title={table.comment || table.table_type}
+                        >
+                          <Table2 size={14} />
+                          <span className="tree-main">{table.name}</span>
+                          <span className="tree-sub">{formatRows(table.table_rows)}</span>
+                        </button>
                       ))}
+                      {activeTables.length > 0 && filteredTables.length === 0 && (
+                        <div className="empty-state table-filter-empty">No tables match &ldquo;{tableFilter}&rdquo;</div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -514,7 +635,7 @@ function App() {
                       <h3>{tableDetail.database}.{tableDetail.table}</h3>
                       <span className="muted">{tableDetail.columns.length} columns · sample limit {tableDetail.sample_limit}</span>
                     </div>
-                    <button className="secondary-button" onClick={() => void selectTable(tableDetail.table)}>
+                    <button className="secondary-button" onClick={() => void selectTable(tableDetail.table, true)}>
                       <RefreshCw size={16} /> Reload
                     </button>
                   </div>
@@ -565,131 +686,213 @@ function App() {
             </section>
           </section>
         </div>
+          </>
+        )}
       </section>
+    </main>
+  )
+}
 
-      {connectionModalOpen && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !connecting) {
-              setConnectionModalOpen(false)
-            }
-          }}
-        >
-          <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="connection-dialog-title">
-            <div className="modal-header">
-              <div>
-                <p className="eyebrow">New saved connection</p>
-                <h3 id="connection-dialog-title">Add MySQL connection</h3>
-                <span className="muted">Connection details are saved locally for this service.</span>
-              </div>
-              <button className="icon-button" onClick={() => setConnectionModalOpen(false)} disabled={connecting} aria-label="Close">
-                <X size={16} />
+function SettingsPage({
+  onBack,
+  cacheTtlMinutes,
+  updateCacheTtlMinutes,
+  sampleLimit,
+  updateSampleLimit,
+  form,
+  updateForm,
+  connecting,
+  createConnection,
+  error,
+  message,
+}: {
+  onBack: () => void
+  cacheTtlMinutes: string
+  updateCacheTtlMinutes: (value: string) => void
+  sampleLimit: string
+  updateSampleLimit: (value: string) => void
+  form: ConnectForm
+  updateForm: <Key extends keyof ConnectForm>(key: Key, value: ConnectForm[Key]) => void
+  connecting: boolean
+  createConnection: () => Promise<void>
+  error: string
+  message: string
+}) {
+  return (
+    <div className="settings-page">
+      <header className="settings-header">
+        <button className="secondary-button" type="button" onClick={onBack}>
+          <ChevronLeft size={16} /> Back
+        </button>
+        <div>
+          <p className="eyebrow">SQL Workbench</p>
+          <h2>Settings</h2>
+        </div>
+      </header>
+
+      {(error || message) && (
+        <div className={`notice ${error ? 'error' : 'success'}`}>
+          {error ? <AlertTriangle size={16} /> : <Activity size={16} />}
+          {error || message}
+        </div>
+      )}
+
+      <div className="settings-sections">
+        <section className="settings-section">
+          <h3>Preferences</h3>
+          <label>
+            Metadata cache (minutes)
+            <input
+              type="number"
+              min="1"
+              value={cacheTtlMinutes}
+              onChange={(event) => updateCacheTtlMinutes(event.target.value)}
+            />
+          </label>
+          <p className="form-hint">Caches table names and table structure only. SQL query results are not cached.</p>
+          <label>
+            Default sample rows
+            <input
+              type="number"
+              min="1"
+              value={sampleLimit}
+              onChange={(event) => updateSampleLimit(event.target.value)}
+            />
+          </label>
+          <p className="form-hint">Number of rows shown in the Data tab when clicking a table. Default: 50.</p>
+        </section>
+
+        <section className="settings-section">
+          <h3>Add saved connection</h3>
+          <p className="form-hint">MySQL credentials or Archery platform settings are saved locally for this service.</p>
+          <form
+            className="modal-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void createConnection()
+            }}
+          >
+            <div className="connection-mode-toggle" role="tablist" aria-label="Connection input mode">
+              <button
+                type="button"
+                className={form.connectionMode === 'fields' ? 'active' : ''}
+                onClick={() => updateForm('connectionMode', 'fields')}
+              >
+                Fields
+              </button>
+              <button
+                type="button"
+                className={form.connectionMode === 'url' ? 'active' : ''}
+                onClick={() => updateForm('connectionMode', 'url')}
+              >
+                URL
+              </button>
+              <button
+                type="button"
+                className={form.connectionMode === 'archery' ? 'active' : ''}
+                onClick={() => {
+                  updateForm('connectionMode', 'archery')
+                  updateForm('label', form.label === 'Local MySQL' ? 'WMS Archery UAT CN' : form.label)
+                }}
+              >
+                Archery Platform
               </button>
             </div>
 
-            <form
-              className="modal-form"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void createConnection()
-              }}
-            >
-              <div className="connection-mode-toggle" role="tablist" aria-label="Connection input mode">
-                <button
-                  type="button"
-                  className={form.connectionMode === 'fields' ? 'active' : ''}
-                  onClick={() => updateForm('connectionMode', 'fields')}
-                >
-                  Fields
-                </button>
-                <button
-                  type="button"
-                  className={form.connectionMode === 'url' ? 'active' : ''}
-                  onClick={() => updateForm('connectionMode', 'url')}
-                >
-                  URL
-                </button>
-              </div>
-
-              <div className="field-grid">
-                <label>
-                  Label
-                  <input value={form.label} onChange={(event) => updateForm('label', event.target.value)} />
-                </label>
+            <div className="field-grid">
+              <label>
+                Label
+                <input value={form.label} onChange={(event) => updateForm('label', event.target.value)} />
+              </label>
+              {form.connectionMode !== 'archery' && (
                 <label>
                   Database type
                   <select value={form.databaseType} onChange={(event) => updateForm('databaseType', event.target.value)}>
                     <option value="mysql">MySQL</option>
                   </select>
                 </label>
+              )}
 
-                {form.connectionMode === 'url' ? (
-                  <>
-                    <label className="full-span">
-                      Connection URL
-                      <textarea
-                        className="connection-url-input"
-                        value={form.connectionUrl}
-                        onChange={(event) => updateForm('connectionUrl', event.target.value)}
-                        placeholder="mysql://root:password@127.0.0.1:3306/app_db"
-                        required
-                        spellCheck={false}
-                      />
-                    </label>
-                    <p className="form-hint full-span">
-                      Supports mysql://user:password@host:port/db and jdbc:mysql://host:port/db?user=root&amp;password=secret.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <label>
-                      Host
-                      <input value={form.host} onChange={(event) => updateForm('host', event.target.value)} />
-                    </label>
-                    <label>
-                      Port
-                      <input value={form.port} onChange={(event) => updateForm('port', event.target.value)} />
-                    </label>
-                    <label>
-                      User
-                      <input value={form.username} onChange={(event) => updateForm('username', event.target.value)} />
-                    </label>
-                    <label>
-                      Password
-                      <input
-                        value={form.password}
-                        onChange={(event) => updateForm('password', event.target.value)}
-                        type="password"
-                        autoComplete="current-password"
-                      />
-                    </label>
-                    <label>
-                      Default DB
-                      <input
-                        value={form.database}
-                        onChange={(event) => updateForm('database', event.target.value)}
-                        placeholder="optional"
-                      />
-                    </label>
-                  </>
-                )}
-              </div>
+              {form.connectionMode === 'archery' ? (
+                <>
+                  <label>
+                    Environment
+                    <select value={form.archeryEnv} onChange={(event) => updateForm('archeryEnv', event.target.value)}>
+                      {Object.entries(archeryEnvironmentLabels).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Default DB
+                    <input value={form.archeryDbName} onChange={(event) => updateForm('archeryDbName', event.target.value)} placeholder="wms" />
+                  </label>
+                  <p className="form-hint full-span">
+                    Uses backend Archery credentials from the local environment. SQL Workbench enforces read-only execution for Archery connections.
+                  </p>
+                </>
+              ) : form.connectionMode === 'url' ? (
+                <>
+                  <label className="full-span">
+                    Connection URL
+                    <textarea
+                      className="connection-url-input"
+                      value={form.connectionUrl}
+                      onChange={(event) => updateForm('connectionUrl', event.target.value)}
+                      placeholder="mysql://root:password@127.0.0.1:3306/app_db"
+                      required
+                      spellCheck={false}
+                    />
+                  </label>
+                  <p className="form-hint full-span">
+                    Supports mysql://user:password@host:port/db and jdbc:mysql://host:port/db?user=root&amp;password=secret.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <label>
+                    Host
+                    <input value={form.host} onChange={(event) => updateForm('host', event.target.value)} />
+                  </label>
+                  <label>
+                    Port
+                    <input value={form.port} onChange={(event) => updateForm('port', event.target.value)} />
+                  </label>
+                  <label>
+                    User
+                    <input value={form.username} onChange={(event) => updateForm('username', event.target.value)} />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      value={form.password}
+                      onChange={(event) => updateForm('password', event.target.value)}
+                      type="password"
+                      autoComplete="current-password"
+                    />
+                  </label>
+                  <label>
+                    Default DB
+                    <input
+                      value={form.database}
+                      onChange={(event) => updateForm('database', event.target.value)}
+                      placeholder="optional"
+                    />
+                  </label>
+                </>
+              )}
+            </div>
 
-              <div className="modal-actions">
-                <button className="secondary-button" type="button" onClick={() => setConnectionModalOpen(false)} disabled={connecting}>
-                  Cancel
-                </button>
-                <button className="primary-button compact" type="submit" disabled={connecting}>
-                  {connecting ? <Loader2 className="spin" size={16} /> : <PlugZap size={16} />}
-                  Save & connect
-                </button>
-              </div>
-            </form>
-          </section>
-        </div>
-      )}
-    </main>
+            <div className="modal-actions">
+              <button className="primary-button compact" type="submit" disabled={connecting}>
+                {connecting ? <Loader2 className="spin" size={16} /> : <PlugZap size={16} />}
+                Save & connect
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>
   )
 }
 
@@ -807,49 +1010,219 @@ function RowsTable({
     })
   }
 
+  // Split layout: a frozen header region, a horizontal scrollbar proxy placed right
+  // below the header, and a vertically scrolling body region. The header and body are
+  // separate tables, so column widths are measured from the body (auto layout) and
+  // applied to both via a shared <colgroup> to keep them aligned. Horizontal scrolling
+  // is driven by the proxy (between header and first row) so users no longer have to
+  // reach the bottom of the table to drag the horizontal scrollbar.
+  const headerTableRef = useRef<HTMLTableElement | null>(null)
+  const bodyTableRef = useRef<HTMLTableElement | null>(null)
+  const bodyRegionRef = useRef<HTMLDivElement | null>(null)
+  const proxyRef = useRef<HTMLDivElement | null>(null)
+  const contentWidthRef = useRef(0)
+  const colWidthsRef = useRef<number[]>([])
+  const [colWidths, setColWidths] = useState<number[]>([])
+  const [contentWidth, setContentWidth] = useState(0)
+  const [overflowing, setOverflowing] = useState(false)
+
+  const applyScroll = useCallback((scrollLeft: number) => {
+    const transform = `translateX(${-scrollLeft}px)`
+    if (headerTableRef.current) headerTableRef.current.style.transform = transform
+    if (bodyTableRef.current) bodyTableRef.current.style.transform = transform
+  }, [])
+
+  // Natural (content-driven) column widths, measured once per column/row set. Stored
+  // in a ref so resize can re-derive display widths without re-reading the DOM (which
+  // would require falling back to auto layout and cause a flash).
+  const naturalWidthsRef = useRef<number[]>([])
+
+  // Derive display column widths from the measured natural widths and the current
+  // viewport. When content overflows, natural pixel widths are used so the proxy can
+  // scroll the full content. When content fits, columns are scaled proportionally to
+  // fill the viewport, matching the previous full-width table appearance.
+  const applyWidths = useCallback(() => {
+    const bodyRegion = bodyRegionRef.current
+    if (!bodyRegion) return
+    const natural = naturalWidthsRef.current
+    const total = contentWidthRef.current
+    const clientWidth = bodyRegion.clientWidth
+    const overflow = total > clientWidth
+    let widths: number[]
+    let tableWidth: number
+    if (overflow) {
+      widths = natural
+      tableWidth = total
+    } else if (total > 0) {
+      const scale = clientWidth / total
+      widths = natural.map((width) => width * scale)
+      tableWidth = clientWidth
+    } else {
+      widths = []
+      tableWidth = 0
+    }
+    colWidthsRef.current = widths
+    setColWidths(widths)
+    setContentWidth(tableWidth)
+    setOverflowing(overflow)
+  }, [])
+
+  const measure = useCallback(() => {
+    const headerTable = headerTableRef.current
+    const bodyTable = bodyTableRef.current
+    if (!headerTable || !bodyTable) return
+    const headerRow = headerTable.tHead?.rows[0]
+    const bodyRow = bodyTable.tBodies[0]?.rows[0]
+    if (!headerRow || !bodyRow) return
+    const count = headerRow.cells.length
+    const widths: number[] = []
+    let total = 0
+    for (let index = 0; index < count; index += 1) {
+      const headerWidth = headerRow.cells[index].getBoundingClientRect().width
+      const bodyWidth = bodyRow.cells[index]?.getBoundingClientRect().width ?? 0
+      const width = Math.max(headerWidth, bodyWidth)
+      widths.push(width)
+      total += width
+    }
+    naturalWidthsRef.current = widths
+    contentWidthRef.current = total
+    applyWidths()
+    // New data: reset any horizontal scroll so the table starts at the left edge.
+    if (proxyRef.current) proxyRef.current.scrollLeft = 0
+    applyScroll(0)
+  }, [applyWidths, applyScroll])
+
+  // Re-measure whenever the column set or row data changes. On the first pass the
+  // tables are already in auto layout, so widths can be read synchronously before
+  // paint. After data changes the previous locked widths must be cleared first so
+  // natural widths can be re-read on the next frame.
+  useLayoutEffect(() => {
+    if (colWidthsRef.current.length === 0) {
+      measure()
+      return
+    }
+    colWidthsRef.current = []
+    setColWidths([])
+    const frame = requestAnimationFrame(measure)
+    return () => cancelAnimationFrame(frame)
+  }, [displayColumns, rows, measure])
+
+  // Re-measure once webfonts are ready (natural widths can shift after font swap).
+  useEffect(() => {
+    if (!document.fonts?.ready) return
+    let cancelled = false
+    document.fonts.ready.then(() => {
+      if (cancelled) return
+      colWidthsRef.current = []
+      setColWidths([])
+      requestAnimationFrame(measure)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [measure])
+
+  // On resize, natural widths are unchanged; just re-derive display widths (toggling
+  // between fill-mode scaling and overflow scrolling) without re-reading the DOM, so
+  // the user's horizontal scroll position is preserved while overflow is active.
+  useEffect(() => {
+    const bodyRegion = bodyRegionRef.current
+    if (!bodyRegion) return
+    const observer = new ResizeObserver(() => applyWidths())
+    observer.observe(bodyRegion)
+    return () => observer.disconnect()
+  }, [applyWidths])
+
+  // When content no longer overflows (proxy is hidden), drop any leftover horizontal
+  // shift so the table is not left translated after a resize.
+  useEffect(() => {
+    if (overflowing) return
+    if (proxyRef.current) proxyRef.current.scrollLeft = 0
+    applyScroll(0)
+  }, [overflowing, applyScroll])
+
+  const onProxyScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    applyScroll(event.currentTarget.scrollLeft)
+  }
+
+  const onBodyWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.deltaX !== 0 && proxyRef.current) {
+      proxyRef.current.scrollLeft += event.deltaX
+    }
+  }
+
+  const locked = colWidths.length > 0
+  const tableStyle = locked
+    ? { tableLayout: 'fixed' as const, width: contentWidth }
+    : { width: 'auto' as const }
+  const colgroup = locked ? (
+    <colgroup>
+      {colWidths.map((width, index) => (
+        <col key={index} style={{ width }} />
+      ))}
+    </colgroup>
+  ) : null
+
+  const renderHeader = () => (
+    <table ref={headerTableRef} style={tableStyle}>
+      {colgroup}
+      <thead>
+        <tr>
+          {displayColumns.map((column) => {
+            const activeDirection = sortState?.column === column.name ? sortState.direction : null
+            return (
+              <th key={column.name} title={column.type_name}>
+                <div className="th-content">
+                  <span>{column.name}</span>
+                  {sortable && (
+                    <button
+                      className={`sort-button ${activeDirection ? 'active' : ''}`}
+                      type="button"
+                      onClick={() => toggleSort(column.name)}
+                      title="Toggle sort: default → ascending → descending"
+                      aria-label={`Toggle sort for ${column.name}`}
+                    >
+                      {activeDirection === 'asc' ? '↑' : activeDirection === 'desc' ? '↓' : '↕'}
+                    </button>
+                  )}
+                </div>
+                <small>{column.type_name}</small>
+              </th>
+            )
+          })}
+        </tr>
+      </thead>
+    </table>
+  )
+
   return (
-    <div className={`table-wrap ${fill ? 'fill' : ''}`}>
+    <div className={`rows-split ${fill ? 'fill' : ''}`}>
       {meta && <div className="result-meta"><span>{meta}</span></div>}
       {rows.length === 0 ? (
         <div className="empty-results">No rows</div>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              {displayColumns.map((column) => {
-                const activeDirection = sortState?.column === column.name ? sortState.direction : null
-                return (
-                  <th key={column.name} title={column.type_name}>
-                    <div className="th-content">
-                      <span>{column.name}</span>
-                      {sortable && (
-                        <button
-                          className={`sort-button ${activeDirection ? 'active' : ''}`}
-                          type="button"
-                          onClick={() => toggleSort(column.name)}
-                          title="Toggle sort: default → ascending → descending"
-                          aria-label={`Toggle sort for ${column.name}`}
-                        >
-                          {activeDirection === 'asc' ? '↑' : activeDirection === 'desc' ? '↓' : '↕'}
-                        </button>
-                      )}
-                    </div>
-                    <small>{column.type_name}</small>
-                  </th>
-                )
-              })}
-            </tr>
-          </thead>
-          <tbody>
-            {sortedRows.map((row, rowIndex) => (
-              <tr key={rowIndex}>
-                {displayColumns.map((column) => (
-                  <td key={column.name}>{formatCell(row[column.name])}</td>
+        <>
+          <div className="rows-header-region">{renderHeader()}</div>
+          {overflowing && (
+            <div className="rows-hscroll" ref={proxyRef} onScroll={onProxyScroll}>
+              <div className="rows-hscroll-spacer" style={{ width: contentWidth }} />
+            </div>
+          )}
+          <div className="rows-body-region" ref={bodyRegionRef} onWheel={onBodyWheel}>
+            <table ref={bodyTableRef} style={tableStyle}>
+              {colgroup}
+              <tbody>
+                {sortedRows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {displayColumns.map((column) => (
+                      <td key={column.name}>{formatCell(row[column.name])}</td>
+                    ))}
+                  </tr>
                 ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   )
@@ -893,6 +1266,16 @@ function formatRows(value?: number | null) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
   return String(value)
+}
+
+function connectionSubtitle(connection: ConnectionSummary) {
+  if (connection.database_type === 'archery') {
+    const env = connection.archery_env || connection.username || 'archery'
+    const db = connection.archery_db_name || connection.database || 'wms'
+    return `Archery · ${env} / ${db}`
+  }
+
+  return `${connection.username}@${connection.host}:${connection.port}${connection.database ? ` / ${connection.database}` : ''}`
 }
 
 function compareCellValues(left: unknown, right: unknown) {

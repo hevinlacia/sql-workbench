@@ -1,8 +1,13 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -16,7 +21,7 @@ use sqlx::{
     Column, MySqlPool, Row, TypeInfo,
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow},
 };
-use tokio::sync::RwLock;
+use tokio::{process::Command, sync::RwLock};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -27,6 +32,8 @@ use uuid::Uuid;
 struct AppState {
     saved_connections: Arc<RwLock<HashMap<Uuid, SavedConnection>>>,
     pools: Arc<RwLock<HashMap<Uuid, ConnectionEntry>>>,
+    archery_tables_cache: Arc<RwLock<HashMap<String, CachedEntry<Vec<TableInfo>>>>>,
+    archery_table_structure_cache: Arc<RwLock<HashMap<String, CachedEntry<Vec<TableColumn>>>>>,
     config_path: Arc<PathBuf>,
 }
 
@@ -35,6 +42,20 @@ struct ConnectionEntry {
     server_version: String,
     pool: MySqlPool,
 }
+
+#[derive(Clone)]
+struct CachedEntry<T> {
+    cached_at: Instant,
+    value: T,
+}
+
+impl<T: Clone> CachedEntry<T> {
+    fn fresh_value(&self, ttl: Duration) -> Option<T> {
+        (self.cached_at.elapsed() < ttl).then(|| self.value.clone())
+    }
+}
+
+const DEFAULT_ARCHERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedConnection {
@@ -47,8 +68,18 @@ struct SavedConnection {
     #[serde(default = "default_database_type")]
     database_type: String,
     database: Option<String>,
+    #[serde(default)]
+    archery_env: Option<String>,
+    #[serde(default)]
+    archery_db_name: Option<String>,
     max_connections: u32,
     last_server_version: Option<String>,
+}
+
+impl SavedConnection {
+    fn is_archery(&self) -> bool {
+        self.database_type.eq_ignore_ascii_case("archery")
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +161,10 @@ struct ConnectRequest {
     #[serde(default)]
     database: Option<String>,
     #[serde(default)]
+    archery_env: Option<String>,
+    #[serde(default)]
+    archery_db_name: Option<String>,
+    #[serde(default)]
     label: Option<String>,
     #[serde(default = "default_max_connections")]
     max_connections: u32,
@@ -144,6 +179,10 @@ struct ConnectionSummary {
     username: String,
     database_type: String,
     database: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archery_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archery_db_name: Option<String>,
     server_version: Option<String>,
     connected: bool,
 }
@@ -158,7 +197,7 @@ struct TablesResponse {
     tables: Vec<TableInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TableInfo {
     name: String,
     table_type: String,
@@ -167,7 +206,7 @@ struct TableInfo {
     comment: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TableColumn {
     name: String,
     column_type: String,
@@ -178,7 +217,7 @@ struct TableColumn {
     comment: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TableDetailResponse {
     database: String,
     table: String,
@@ -197,13 +236,39 @@ struct QueryRequest {
     max_rows: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize)]
+struct CacheQuery {
+    #[serde(default, deserialize_with = "deserialize_refresh_flag")]
+    refresh: bool,
+    #[serde(default)]
+    cache_ttl_minutes: Option<u64>,
+    #[serde(default)]
+    sample_limit: Option<usize>,
+}
+
+fn deserialize_refresh_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value
+        .as_deref()
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false))
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ColumnInfo {
     name: String,
     type_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum QueryResponse {
     Rows {
@@ -253,6 +318,8 @@ async fn main() {
     let state = AppState {
         saved_connections: Arc::new(RwLock::new(saved_connections)),
         pools: Arc::new(RwLock::new(HashMap::new())),
+        archery_tables_cache: Arc::new(RwLock::new(HashMap::new())),
+        archery_table_structure_cache: Arc::new(RwLock::new(HashMap::new())),
         config_path: Arc::new(config_path),
     };
 
@@ -315,9 +382,20 @@ async fn create_connection(
     Json(request): Json<ConnectRequest>,
 ) -> Result<Json<ConnectionSummary>, ApiError> {
     let mut saved = saved_connection_from_request(request)?;
+    let connection_id = saved.connection_id;
+
+    if saved.is_archery() {
+        saved.last_server_version = Some("Archery SQL platform".to_string());
+        {
+            let mut connections = state.saved_connections.write().await;
+            connections.insert(connection_id, saved.clone());
+        }
+        persist_saved_connections(&state).await?;
+        return Ok(Json(summary_from_saved(&saved, true)));
+    }
+
     let (pool, server_version) = open_pool(&saved).await?;
     saved.last_server_version = Some(server_version.clone());
-    let connection_id = saved.connection_id;
 
     {
         let mut connections = state.saved_connections.write().await;
@@ -366,8 +444,9 @@ async fn delete_connection(
         connections.remove(&connection_id)
     };
 
-    if removed.is_none() {
-        return Err(ApiError::not_found("connection not found"));
+    let removed = removed.ok_or_else(|| ApiError::not_found("connection not found"))?;
+    if removed.is_archery() {
+        clear_archery_cache_for_connection(&state, &removed).await;
     }
 
     persist_saved_connections(&state).await?;
@@ -387,6 +466,19 @@ async fn list_databases(
     State(state): State<AppState>,
     Path(connection_id): Path<Uuid>,
 ) -> Result<Json<DatabasesResponse>, ApiError> {
+    let saved = saved_connection(&state, connection_id).await?;
+    if saved.is_archery() {
+        let database = saved
+            .archery_db_name
+            .as_deref()
+            .or(saved.database.as_deref())
+            .unwrap_or("wms")
+            .to_string();
+        return Ok(Json(DatabasesResponse {
+            databases: vec![database],
+        }));
+    }
+
     let pool = get_pool(&state, connection_id).await?;
     let rows = sqlx::query("SHOW DATABASES").fetch_all(&pool).await?;
     let databases = rows
@@ -399,7 +491,42 @@ async fn list_databases(
 async fn list_tables(
     State(state): State<AppState>,
     Path((connection_id, database)): Path<(Uuid, String)>,
+    Query(cache_query): Query<CacheQuery>,
 ) -> Result<Json<TablesResponse>, ApiError> {
+    let saved = saved_connection(&state, connection_id).await?;
+    if saved.is_archery() {
+        let cache_key = archery_tables_cache_key(&saved, &database);
+        if !cache_query.refresh {
+            if let Some(tables) = cached_value(
+                &state.archery_tables_cache,
+                &cache_key,
+                cache_ttl(cache_query.cache_ttl_minutes),
+            )
+            .await
+            {
+                return Ok(Json(TablesResponse { tables }));
+            }
+        }
+
+        let response = execute_archery_query(
+            &saved,
+            &format!(
+                r#"
+                SELECT TABLE_NAME, TABLE_TYPE, ENGINE, TABLE_ROWS, TABLE_COMMENT
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = '{}'
+                ORDER BY TABLE_NAME
+                "#,
+                sql_string_literal(&database)
+            ),
+            5000,
+        )
+        .await?;
+        let tables = table_infos_from_query_response(response);
+        set_cached_value(&state.archery_tables_cache, cache_key, tables.clone()).await;
+        return Ok(Json(TablesResponse { tables }));
+    }
+
     let pool = get_pool(&state, connection_id).await?;
     let rows = sqlx::query(
         r#"
@@ -430,7 +557,78 @@ async fn list_tables(
 async fn get_table_detail(
     State(state): State<AppState>,
     Path((connection_id, database, table)): Path<(Uuid, String, String)>,
+    Query(cache_query): Query<CacheQuery>,
 ) -> Result<Json<TableDetailResponse>, ApiError> {
+    let saved = saved_connection(&state, connection_id).await?;
+    if saved.is_archery() {
+        let cache_key = archery_table_detail_cache_key(&saved, &database, &table);
+        let columns = if !cache_query.refresh {
+            cached_value(
+                &state.archery_table_structure_cache,
+                &cache_key,
+                cache_ttl(cache_query.cache_ttl_minutes),
+            )
+            .await
+        } else {
+            None
+        };
+
+        let columns = match columns {
+            Some(columns) => columns,
+            None => {
+                let column_response = execute_archery_query(
+                    &saved,
+                    &format!(
+                        r#"
+                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                ORDER BY ORDINAL_POSITION
+                "#,
+                        sql_string_literal(&database),
+                        sql_string_literal(&table)
+                    ),
+                    1000,
+                )
+                .await?;
+                let columns = table_columns_from_query_response(column_response);
+                if columns.is_empty() {
+                    return Err(ApiError::not_found("table not found"));
+                }
+                set_cached_value(
+                    &state.archery_table_structure_cache,
+                    cache_key,
+                    columns.clone(),
+                )
+                .await;
+                columns
+            }
+        };
+
+        let sample_limit = cache_query.sample_limit.unwrap_or(100);
+        let data_response = execute_archery_query(
+            &saved,
+            &format!(
+                "SELECT * FROM {}.{} LIMIT {sample_limit}",
+                quote_identifier(&database),
+                quote_identifier(&table)
+            ),
+            sample_limit,
+        )
+        .await?;
+        let (data_columns, rows) = rows_from_query_response(data_response);
+
+        return Ok(Json(TableDetailResponse {
+            database,
+            table,
+            columns,
+            data_columns,
+            rows,
+            sample_limit,
+            ddl: None,
+        }));
+    }
+
     let pool = get_pool(&state, connection_id).await?;
     let column_rows = sqlx::query(
         r#"
@@ -465,7 +663,7 @@ async fn get_table_detail(
         })
         .collect::<Vec<_>>();
 
-    let sample_limit = 100;
+    let sample_limit = cache_query.sample_limit.unwrap_or(100);
     let data_sql = format!(
         "SELECT * FROM {}.{} LIMIT {sample_limit}",
         quote_identifier(&database),
@@ -502,6 +700,13 @@ async fn execute_query(
     let sql = request.sql.trim();
     if sql.is_empty() {
         return Err(ApiError::bad_request("sql is required"));
+    }
+
+    let saved = saved_connection(&state, connection_id).await?;
+    if saved.is_archery() {
+        return Ok(Json(
+            execute_archery_query(&saved, sql, request.max_rows).await?,
+        ));
     }
 
     let pool = get_pool(&state, connection_id).await?;
@@ -544,6 +749,388 @@ async fn execute_query(
             rows_affected: result.rows_affected(),
         }))
     }
+}
+
+async fn execute_archery_query(
+    saved: &SavedConnection,
+    sql: &str,
+    max_rows: usize,
+) -> Result<QueryResponse, ApiError> {
+    if !returns_rows(sql) {
+        return Err(ApiError::bad_request(
+            "Archery connections are read-only in SQL Workbench; use SELECT, SHOW, DESC, EXPLAIN, or WITH",
+        ));
+    }
+
+    let archery_env = saved
+        .archery_env
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("archery_env is missing on saved connection"))?;
+    let db_name = saved
+        .archery_db_name
+        .as_deref()
+        .or(saved.database.as_deref())
+        .unwrap_or("wms");
+    let max_rows = max_rows.clamp(1, 5000);
+    let started = Instant::now();
+    let output = Command::new(archery_cli_path())
+        .arg("--env")
+        .arg(archery_env)
+        .arg("--db-name")
+        .arg(db_name)
+        .arg("--limit-num")
+        .arg(max_rows.to_string())
+        .arg("--sql")
+        .arg(sql)
+        .output()
+        .await?;
+    let duration_ms = started.elapsed().as_millis();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let message = if stderr.is_empty() { stdout } else { stderr };
+        return Err(ApiError::bad_request(format!(
+            "Archery query failed: {}",
+            if message.is_empty() {
+                "unknown error"
+            } else {
+                &message
+            }
+        )));
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| ApiError::internal(format!("Archery output is not UTF-8: {error}")))?;
+    let payload = serde_json::from_str::<Value>(&stdout).map_err(|error| {
+        ApiError::bad_request(format!(
+            "Archery returned non-JSON output: {error}; output: {}",
+            stdout.trim()
+        ))
+    })?;
+    archery_payload_to_query_response(payload, duration_ms, max_rows)
+}
+
+fn archery_cli_path() -> String {
+    std::env::var("SQL_WORKBENCH_ARCHERY_CLI").unwrap_or_else(|_| {
+        "/home/hevin/.agents/skills/mysql-archery-query/bin/archery_sql_query_direct".to_string()
+    })
+}
+
+async fn cached_value<T: Clone>(
+    cache: &Arc<RwLock<HashMap<String, CachedEntry<T>>>>,
+    key: &str,
+    ttl: Duration,
+) -> Option<T> {
+    cache
+        .read()
+        .await
+        .get(key)
+        .and_then(|entry| entry.fresh_value(ttl))
+}
+
+async fn set_cached_value<T>(
+    cache: &Arc<RwLock<HashMap<String, CachedEntry<T>>>>,
+    key: String,
+    value: T,
+) {
+    cache.write().await.insert(
+        key,
+        CachedEntry {
+            cached_at: Instant::now(),
+            value,
+        },
+    );
+}
+
+fn archery_tables_cache_key(saved: &SavedConnection, database: &str) -> String {
+    format!(
+        "{}:{}:{}",
+        saved.archery_env.as_deref().unwrap_or(""),
+        saved
+            .archery_db_name
+            .as_deref()
+            .or(saved.database.as_deref())
+            .unwrap_or(""),
+        database
+    )
+}
+
+fn archery_table_detail_cache_key(saved: &SavedConnection, database: &str, table: &str) -> String {
+    format!("{}:{}", archery_tables_cache_key(saved, database), table)
+}
+
+fn cache_ttl(minutes: Option<u64>) -> Duration {
+    minutes
+        .filter(|value| *value > 0)
+        .map(|value| Duration::from_secs(value.saturating_mul(60)))
+        .unwrap_or(DEFAULT_ARCHERY_CACHE_TTL)
+}
+
+async fn clear_archery_cache_for_connection(state: &AppState, saved: &SavedConnection) {
+    let prefix = format!(
+        "{}:{}:",
+        saved.archery_env.as_deref().unwrap_or(""),
+        saved
+            .archery_db_name
+            .as_deref()
+            .or(saved.database.as_deref())
+            .unwrap_or("")
+    );
+    state
+        .archery_tables_cache
+        .write()
+        .await
+        .retain(|key, _| !key.starts_with(&prefix));
+    state
+        .archery_table_structure_cache
+        .write()
+        .await
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
+fn archery_payload_to_query_response(
+    payload: Value,
+    duration_ms: u128,
+    max_rows: usize,
+) -> Result<QueryResponse, ApiError> {
+    if archery_payload_failed(&payload) {
+        return Err(ApiError::bad_request(format!(
+            "Archery query failed: {}",
+            archery_message(&payload).unwrap_or_else(|| payload.to_string())
+        )));
+    }
+
+    let data = payload
+        .get("data")
+        .or_else(|| payload.get("result"))
+        .unwrap_or(&payload);
+    let rows_value = data
+        .get("rows")
+        .or_else(|| data.get("result"))
+        .or_else(|| data.get("data"));
+    let columns = archery_columns(data, &[]);
+    let rows = rows_value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| archery_row_to_map(value, &columns))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let columns = if columns.is_empty() {
+        archery_columns(data, &rows)
+    } else {
+        columns
+    };
+    let limited = rows.len() > max_rows;
+    let row_count = archery_row_count(data).unwrap_or(rows.len());
+    let rows = rows.into_iter().take(max_rows).collect::<Vec<_>>();
+
+    Ok(QueryResponse::Rows {
+        duration_ms,
+        columns,
+        row_count,
+        rows,
+        limited,
+    })
+}
+
+fn archery_payload_failed(payload: &Value) -> bool {
+    payload
+        .get("status")
+        .or_else(|| payload.get("code"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+        })
+        .map(|status| status != 0 && status != 1)
+        .unwrap_or(false)
+}
+
+fn archery_message(payload: &Value) -> Option<String> {
+    payload
+        .get("msg")
+        .or_else(|| payload.get("message"))
+        .or_else(|| payload.get("error"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn archery_row_count(data: &Value) -> Option<usize> {
+    data.get("row_count")
+        .or_else(|| data.get("count"))
+        .or_else(|| data.get("total"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .map(|value| value as usize)
+                .or_else(|| value.as_str().and_then(|text| text.parse::<usize>().ok()))
+        })
+}
+
+fn archery_columns(data: &Value, rows: &[Map<String, Value>]) -> Vec<ColumnInfo> {
+    if let Some(columns) = data
+        .get("column_list")
+        .or_else(|| data.get("columns"))
+        .and_then(Value::as_array)
+    {
+        let parsed = columns
+            .iter()
+            .filter_map(archery_column_info)
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+
+    rows.first()
+        .map(|row| {
+            row.keys()
+                .map(|name| ColumnInfo {
+                    name: name.clone(),
+                    type_name: "unknown".to_string(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn archery_column_info(value: &Value) -> Option<ColumnInfo> {
+    match value {
+        Value::String(name) => Some(ColumnInfo {
+            name: name.clone(),
+            type_name: "unknown".to_string(),
+        }),
+        Value::Object(object) => {
+            let name = object
+                .get("name")
+                .or_else(|| object.get("column"))
+                .or_else(|| object.get("title"))
+                .or_else(|| object.get("field"))
+                .and_then(Value::as_str)?;
+            let type_name = object
+                .get("type")
+                .or_else(|| object.get("type_name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            Some(ColumnInfo {
+                name: name.to_string(),
+                type_name: type_name.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn archery_row_to_map(value: &Value, columns: &[ColumnInfo]) -> Map<String, Value> {
+    match value {
+        Value::Object(object) => object.clone(),
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let column_name = columns
+                    .get(index)
+                    .map(|column| column.name.clone())
+                    .unwrap_or_else(|| format!("col_{}", index + 1));
+                (column_name, value.clone())
+            })
+            .collect(),
+        other => {
+            let mut row = Map::new();
+            row.insert("value".to_string(), other.clone());
+            row
+        }
+    }
+}
+
+fn table_infos_from_query_response(response: QueryResponse) -> Vec<TableInfo> {
+    match response {
+        QueryResponse::Rows { rows, .. } => rows
+            .into_iter()
+            .filter_map(|row| {
+                let name = string_cell(row.get("TABLE_NAME"))?;
+                Some(TableInfo {
+                    name,
+                    table_type: string_cell(row.get("TABLE_TYPE")).unwrap_or_default(),
+                    engine: string_cell(row.get("ENGINE")),
+                    table_rows: u64_cell(row.get("TABLE_ROWS")),
+                    comment: string_cell(row.get("TABLE_COMMENT")),
+                })
+            })
+            .collect(),
+        QueryResponse::Command { .. } => Vec::new(),
+    }
+}
+
+fn table_columns_from_query_response(response: QueryResponse) -> Vec<TableColumn> {
+    match response {
+        QueryResponse::Rows { rows, .. } => rows
+            .into_iter()
+            .filter_map(|row| {
+                let name = string_cell(row.get("COLUMN_NAME"))?;
+                Some(TableColumn {
+                    name,
+                    column_type: string_cell(row.get("COLUMN_TYPE")).unwrap_or_default(),
+                    nullable: string_cell(row.get("IS_NULLABLE"))
+                        .map(|value| value.eq_ignore_ascii_case("YES"))
+                        .unwrap_or(false),
+                    key: string_cell(row.get("COLUMN_KEY")).unwrap_or_default(),
+                    default_value: string_cell(row.get("COLUMN_DEFAULT")),
+                    extra: string_cell(row.get("EXTRA")).unwrap_or_default(),
+                    comment: string_cell(row.get("COLUMN_COMMENT")).unwrap_or_default(),
+                })
+            })
+            .collect(),
+        QueryResponse::Command { .. } => Vec::new(),
+    }
+}
+
+fn rows_from_query_response(response: QueryResponse) -> (Vec<ColumnInfo>, Vec<Map<String, Value>>) {
+    match response {
+        QueryResponse::Rows { columns, rows, .. } => (columns, rows),
+        QueryResponse::Command { .. } => (Vec::new(), Vec::new()),
+    }
+}
+
+fn string_cell(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()).filter(|value| !value.is_empty()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn u64_cell(value: Option<&Value>) -> Option<u64> {
+    match value? {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_i64().map(|value| value as u64)),
+        Value::String(text) => text.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn sql_string_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "''")
+}
+
+async fn saved_connection(
+    state: &AppState,
+    connection_id: Uuid,
+) -> Result<SavedConnection, ApiError> {
+    state
+        .saved_connections
+        .read()
+        .await
+        .get(&connection_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("connection not found"))
 }
 
 async fn get_pool(state: &AppState, connection_id: Uuid) -> Result<MySqlPool, ApiError> {
@@ -606,6 +1193,16 @@ async fn open_pool(saved: &SavedConnection) -> Result<(MySqlPool, String), ApiEr
 }
 
 fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnection, ApiError> {
+    let database_type = request.database_type.trim().to_ascii_lowercase();
+    if database_type == "archery" {
+        return archery_connection_from_request(request);
+    }
+    if database_type != "mysql" {
+        return Err(ApiError::bad_request(
+            "only mysql and archery database types are supported",
+        ));
+    }
+
     let parsed_url = request
         .connection_url
         .as_deref()
@@ -649,13 +1246,6 @@ fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnect
         return Err(ApiError::bad_request("username is required"));
     }
 
-    let database_type = request.database_type.trim().to_ascii_lowercase();
-    if database_type != "mysql" {
-        return Err(ApiError::bad_request(
-            "only mysql database type is supported",
-        ));
-    }
-
     let label = request
         .label
         .as_deref()
@@ -673,7 +1263,54 @@ fn saved_connection_from_request(request: ConnectRequest) -> Result<SavedConnect
         password,
         database_type,
         database,
+        archery_env: None,
+        archery_db_name: None,
         max_connections: request.max_connections.clamp(1, 20),
+        last_server_version: None,
+    })
+}
+
+fn archery_connection_from_request(request: ConnectRequest) -> Result<SavedConnection, ApiError> {
+    let archery_env = request
+        .archery_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("archery_env is required"))?;
+    if !matches!(archery_env, "uat-cn" | "uat-sea" | "pro-cn" | "pro-sea") {
+        return Err(ApiError::bad_request(
+            "archery_env must be one of: uat-cn, uat-sea, pro-cn, pro-sea",
+        ));
+    }
+
+    let archery_db_name = request
+        .archery_db_name
+        .as_deref()
+        .or(request.database.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("wms")
+        .to_owned();
+    let label = request
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("WMS Archery {archery_env}"));
+
+    Ok(SavedConnection {
+        connection_id: Uuid::new_v4(),
+        label,
+        host: "archery.yunlu-tech.cn".to_string(),
+        port: 443,
+        username: archery_env.to_owned(),
+        password: String::new(),
+        database_type: "archery".to_string(),
+        database: Some(archery_db_name.clone()),
+        archery_env: Some(archery_env.to_owned()),
+        archery_db_name: Some(archery_db_name),
+        max_connections: 1,
         last_server_version: None,
     })
 }
@@ -798,6 +1435,8 @@ fn summary_from_saved(saved: &SavedConnection, connected: bool) -> ConnectionSum
         username: saved.username.clone(),
         database_type: saved.database_type.clone(),
         database: saved.database.clone(),
+        archery_env: saved.archery_env.clone(),
+        archery_db_name: saved.archery_db_name.clone(),
         server_version: saved.last_server_version.clone(),
         connected,
     }
@@ -890,9 +1529,9 @@ async fn show_create_table(
         quote_identifier(table)
     );
     let row = sqlx::query(&sql).fetch_one(pool).await?;
-    let ddl: String = row
-        .try_get::<String, _>(1)
-        .map_err(|error| ApiError::internal(format!("failed to read CREATE TABLE statement: {error}")))?;
+    let ddl: String = row.try_get::<String, _>(1).map_err(|error| {
+        ApiError::internal(format!("failed to read CREATE TABLE statement: {error}"))
+    })?;
     Ok(ddl)
 }
 
