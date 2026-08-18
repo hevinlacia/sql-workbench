@@ -812,9 +812,10 @@ textarea:focus {
 
 .sql-tab {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 12px;
   min-height: 0;
+  height: 100%;
 }
 
 .sql-tab-actions {
@@ -1054,6 +1055,63 @@ th small {
 
 tr:hover td {
   background: rgba(59, 130, 246, 0.08);
+}
+
+.rows-body-region tbody tr {
+  cursor: pointer;
+}
+
+tr.row-expanded td,
+tr.row-expanded:hover td {
+  background: rgba(59, 130, 246, 0.12);
+  vertical-align: top;
+  overflow: visible;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.cell-expanded {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.cell-expanded-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e2e8f0;
+}
+
+.cell-expanded-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.cell-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(125, 211, 252, 0.25);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.cell-action:hover {
+  background: rgba(37, 99, 235, 0.35);
+  color: #f8fafc;
 }
 
 .null-value {

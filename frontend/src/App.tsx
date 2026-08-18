@@ -676,7 +676,7 @@ function App() {
                           </div>
                         )}
                         {queryResult?.kind === 'rows' && (
-                          <RowsTable columns={queryResult.columns} rows={queryResult.rows} meta={`${queryResult.row_count} rows · ${queryResult.duration_ms} ms${queryResult.limited ? ' · limited' : ''}`} sortable />
+                          <RowsTable columns={queryResult.columns} rows={queryResult.rows} meta={`${queryResult.row_count} rows · ${queryResult.duration_ms} ms${queryResult.limited ? ' · limited' : ''}`} sortable fill />
                         )}
                       </div>
                     )}
@@ -983,6 +983,11 @@ function RowsTable({
   fill?: boolean
 }) {
   const [sortState, setSortState] = useState<SortState>(null)
+
+  // Clicking a row expands it so every cell shows its full content (wrapped) with a
+  // copy button, instead of being truncated with an ellipsis.
+  const [expandedRow, setExpandedRow] = useState<number | null>(null)
+
   const displayColumns = useMemo(
     () => (columns.length ? columns : Object.keys(rows[0] ?? {}).map((name) => ({ name, type_name: 'unknown' }))),
     [columns, rows],
@@ -1097,6 +1102,7 @@ function RowsTable({
   // paint. After data changes the previous locked widths must be cleared first so
   // natural widths can be re-read on the next frame.
   useLayoutEffect(() => {
+    setExpandedRow(null)
     if (colWidthsRef.current.length === 0) {
       measure()
       return
@@ -1212,13 +1218,35 @@ function RowsTable({
             <table ref={bodyTableRef} style={tableStyle}>
               {colgroup}
               <tbody>
-                {sortedRows.map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    {displayColumns.map((column) => (
-                      <td key={column.name}>{formatCell(row[column.name])}</td>
-                    ))}
-                  </tr>
-                ))}
+                {sortedRows.map((row, rowIndex) => {
+                  const expanded = expandedRow === rowIndex
+                  const toggleRow = () => setExpandedRow(expanded ? null : rowIndex)
+                  return (
+                    <tr
+                      key={rowIndex}
+                      className={expanded ? 'row-expanded' : undefined}
+                      onClick={toggleRow}
+                      title={expanded ? 'Click to collapse row' : 'Click to expand full row'}
+                    >
+                      {displayColumns.map((column) => {
+                        const value = row[column.name]
+                        const text = formatCellText(value)
+                        const isNull = value === null || value === undefined
+                        return (
+                          <td key={column.name} className={expanded ? 'expanded' : undefined}>
+                            {isNull ? (
+                              <span className="null-value">NULL</span>
+                            ) : expanded ? (
+                              <ExpandedCell text={text} />
+                            ) : (
+                              text
+                            )}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -1297,10 +1325,35 @@ function compareCellValues(left: unknown, right: unknown) {
   return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' })
 }
 
-function formatCell(value: unknown) {
-  if (value === null || value === undefined) return <span className="null-value">NULL</span>
+function formatCellText(value: unknown) {
+  if (value === null || value === undefined) return ''
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
+}
+
+function ExpandedCell({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  return (
+    <span className="cell-expanded" onClick={(event) => event.stopPropagation()}>
+      <span className="cell-expanded-text">{text}</span>
+      <span className="cell-expanded-actions">
+        <button type="button" className="cell-action" onClick={copy} title="Copy full value">
+          <Copy size={12} /> {copied ? 'Copied' : 'Copy'}
+        </button>
+      </span>
+    </span>
+  )
 }
 
 function errorMessage(cause: unknown) {
