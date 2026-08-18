@@ -1,0 +1,40 @@
+frontend/src/App.tsx
+  e0034cca15c7a792 679,1328-1329,1335-1356
+  18eabdd0b307f1b7 986-990,1105,1221-1249,1334
+frontend/src/App.css
+  18eabdd0b307f1b7 1060-1061,1064-1066,1069-1073
+  e0034cca15c7a792 815,818,1062-1063,1067-1068,1074-1116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "1d893af4625b51d44e8f6e7edee4a86e84b30531",
+  "prompts": {
+    "18eabdd0b307f1b7": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a00e08-99b3-794a-8e0b-143d308a0ecc",
+        "model": "deepseek-v4-flash-auto"
+      },
+      "human_author": "hevinlacia",
+      "messages": [],
+      "total_additions": 213,
+      "total_deletions": 221,
+      "accepted_lines": 49,
+      "overriden_lines": 0
+    },
+    "e0034cca15c7a792": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a00df6-e72b-7024-b4ef-31628d6d868a",
+        "model": "deepseek-v4-flash-auto"
+      },
+      "human_author": "hevinlacia",
+      "messages": [],
+      "total_additions": 126,
+      "total_deletions": 7,
+      "accepted_lines": 75,
+      "overriden_lines": 0
+    }
+  }
+}
