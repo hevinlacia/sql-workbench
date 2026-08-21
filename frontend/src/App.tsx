@@ -984,8 +984,8 @@ function RowsTable({
 }) {
   const [sortState, setSortState] = useState<SortState>(null)
 
-  // Clicking a row expands it so every cell shows its full content (wrapped) with a
-  // copy button, instead of being truncated with an ellipsis.
+  // Clicking a row expands it so every cell shows its full content (wrapped)
+  // instead of being truncated with an ellipsis.
   const [expandedRow, setExpandedRow] = useState<number | null>(null)
 
   const displayColumns = useMemo(
@@ -1220,7 +1220,32 @@ function RowsTable({
               <tbody>
                 {sortedRows.map((row, rowIndex) => {
                   const expanded = expandedRow === rowIndex
-                  const toggleRow = () => setExpandedRow(expanded ? null : rowIndex)
+                  const toggleRow = () => {
+                    // Dragging to select text (e.g. selecting the full value with the
+                    // mouse) ends with a click event; collapsing the row then would
+                    // drop the selection. Skip toggling while a text selection is active.
+                    const selection = window.getSelection?.()
+                    if (selection && selection.toString().length > 0) return
+                    if (expanded) {
+                      setExpandedRow(null)
+                      return
+                    }
+                    // Only expand rows whose content is actually truncated. Clicking a
+                    // row whose cells all fit just toggles nothing, so short rows keep
+                    // their normal look instead of jumping to the smaller mono font.
+                    const domRow = bodyTableRef.current?.rows[rowIndex]
+                    let needsExpansion = false
+                    if (domRow) {
+                      for (const cell of domRow.cells) {
+                        if (cell.scrollWidth > cell.clientWidth + 1) {
+                          needsExpansion = true
+                          break
+                        }
+                      }
+                    }
+                    if (!needsExpansion) return
+                    setExpandedRow(rowIndex)
+                  }
                   return (
                     <tr
                       key={rowIndex}
@@ -1332,28 +1357,7 @@ function formatCellText(value: unknown) {
 }
 
 function ExpandedCell({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      /* clipboard unavailable */
-    }
-  }
-
-  return (
-    <span className="cell-expanded" onClick={(event) => event.stopPropagation()}>
-      <span className="cell-expanded-text">{text}</span>
-      <span className="cell-expanded-actions">
-        <button type="button" className="cell-action" onClick={copy} title="Copy full value">
-          <Copy size={12} /> {copied ? 'Copied' : 'Copy'}
-        </button>
-      </span>
-    </span>
-  )
+  return <span className="cell-expanded-text">{text}</span>
 }
 
 function errorMessage(cause: unknown) {
