@@ -93,6 +93,10 @@ type QueryResponse = RowsQueryResponse | CommandQueryResponse
 type ConnectionMode = 'fields' | 'url' | 'archery'
 type DetailTab = 'structure' | 'data' | 'sql'
 
+// Server-side sort of the table data sample: { column, direction } maps to the
+// order_by/order_dir query params; null means database-default row order.
+type DataSort = { column: string; direction: 'asc' | 'desc' } | null
+
 type ConnectForm = {
   connectionMode: ConnectionMode
   label: string
@@ -151,6 +155,7 @@ function App() {
   const [databasesByConnection, setDatabasesByConnection] = useState<Record<string, string[]>>({})
   const [tablesByDatabase, setTablesByDatabase] = useState<Record<string, TableInfo[]>>({})
   const [tableDetail, setTableDetail] = useState<TableDetailResponse | null>(null)
+  const [dataSort, setDataSort] = useState<DataSort>(null)
   const [detailTab, setDetailTab] = useState<DetailTab>('data')
   const [sql, setSql] = useState(starterSql)
   const [maxRows, setMaxRows] = useState('500')
@@ -204,13 +209,17 @@ function App() {
     setForm((current) => ({ ...current, [key]: value }))
   }
 
-  const cacheQuery = (refresh = false, sampleLimitOverride?: number) => {
+  const cacheQuery = (refresh = false, sampleLimitOverride?: number, sort?: DataSort) => {
     const ttl = Number(cacheTtlMinutes || 60)
     const params = new URLSearchParams()
     if (refresh) params.set('refresh', '1')
     if (Number.isFinite(ttl) && ttl > 0) params.set('cache_ttl_minutes', String(Math.round(ttl)))
     if (sampleLimitOverride !== undefined && Number.isFinite(sampleLimitOverride) && sampleLimitOverride > 0) {
       params.set('sample_limit', String(Math.round(sampleLimitOverride)))
+    }
+    if (sort) {
+      params.set('order_by', sort.column)
+      params.set('order_dir', sort.direction)
     }
     const text = params.toString()
     return text ? `?${text}` : ''
@@ -379,17 +388,10 @@ function App() {
     }
   }
 
-  async function selectTable(table: string, refresh = false) {
+  async function loadTableDetail(table: string, refresh: boolean, sort: DataSort) {
     if (!activeId || !selectedDatabase) return
-    setSelectedTable(table)
-    setTableDetail(null)
-    setQueryResult(null)
-    setLoadingDetail(true)
-    setError('')
-    setDetailTab('data')
-    setSql(`SELECT *\nFROM \`${selectedDatabase}\`.\`${table}\`\nLIMIT ${sampleLimit || 50};`)
     try {
-      const path = `/api/mysql/connections/${activeId}/databases/${encodeURIComponent(selectedDatabase)}/tables/${encodeURIComponent(table)}${cacheQuery(refresh, Number(sampleLimit || 50))}`
+      const path = `/api/mysql/connections/${activeId}/databases/${encodeURIComponent(selectedDatabase)}/tables/${encodeURIComponent(table)}${cacheQuery(refresh, Number(sampleLimit || 50), sort)}`
       const response = await requestJson<TableDetailResponse>(path)
       setTableDetail(response)
     } catch (cause) {
@@ -399,6 +401,29 @@ function App() {
     }
   }
 
+  async function selectTable(table: string, refresh = false, sort: DataSort = null) {
+    if (!activeId || !selectedDatabase) return
+    setSelectedTable(table)
+    setTableDetail(null)
+    setQueryResult(null)
+    setLoadingDetail(true)
+    setError('')
+    setDetailTab('data')
+    setSql(`SELECT *\nFROM \`${selectedDatabase}\`.\`${table}\`\nLIMIT ${sampleLimit || 50};`)
+    setDataSort(sort)
+    await loadTableDetail(table, refresh, sort)
+  }
+
+  // Sort the data sample in the database: cycling a column header re-queries
+  // with ORDER BY instead of re-sorting the already-fetched rows client-side.
+  async function changeTableSort(column: string, direction: 'asc' | 'desc' | null) {
+    const next: DataSort = direction ? { column, direction } : null
+    setDataSort(next)
+    if (!selectedTable) return
+    setLoadingDetail(true)
+    await loadTableDetail(selectedTable, false, next)
+  }
+
   async function refreshCurrentView() {
     setMessage('')
     await loadConnections()
@@ -406,7 +431,7 @@ function App() {
       await loadTables(activeId, selectedDatabase, true)
     }
     if (selectedTable) {
-      await selectTable(selectedTable, true)
+      await selectTable(selectedTable, true, dataSort)
     }
     setMessage(selectedDatabase || selectedTable ? 'Refreshed latest data.' : 'Connections refreshed.')
   }
@@ -633,9 +658,12 @@ function App() {
                   <div className="detail-heading">
                     <div>
                       <h3>{tableDetail.database}.{tableDetail.table}</h3>
-                      <span className="muted">{tableDetail.columns.length} columns · sample limit {tableDetail.sample_limit}</span>
+                      <span className="muted">
+                        {tableDetail.columns.length} columns · sample limit {tableDetail.sample_limit}
+                        {dataSort ? ` · ORDER BY ${dataSort.column} ${dataSort.direction.toUpperCase()}` : ''}
+                      </span>
                     </div>
-                    <button className="secondary-button" onClick={() => void selectTable(tableDetail.table, true)}>
+                    <button className="secondary-button" onClick={() => void selectTable(tableDetail.table, true, dataSort)}>
                       <RefreshCw size={16} /> Reload
                     </button>
                   </div>
@@ -659,7 +687,16 @@ function App() {
                         <DdlBlock ddl={tableDetail.ddl} />
                       </div>
                     )}
-                    {detailTab === 'data' && <RowsTable columns={tableDetail.data_columns} rows={tableDetail.rows} sortable fill />}
+                    {detailTab === 'data' && (
+                      <RowsTable
+                        columns={tableDetail.data_columns}
+                        rows={tableDetail.rows}
+                        sortable
+                        fill
+                        serverSort={dataSort}
+                        onServerSort={(column, direction) => void changeTableSort(column, direction)}
+                      />
+                    )}
                     {detailTab === 'sql' && (
                       <div className="sql-tab">
                         <textarea value={sql} onChange={(event) => setSql(event.target.value)} spellCheck={false} />
@@ -975,12 +1012,18 @@ function RowsTable({
   meta,
   sortable = false,
   fill = false,
+  serverSort = null,
+  onServerSort,
 }: {
   columns: ColumnInfo[]
   rows: Array<Record<string, unknown>>
   meta?: string
   sortable?: boolean
   fill?: boolean
+  // When onServerSort is provided the rows arrive pre-ordered by the database
+  // and the header state is driven by serverSort instead of local state.
+  serverSort?: DataSort
+  onServerSort?: (column: string, direction: 'asc' | 'desc' | null) => void
 }) {
   const [sortState, setSortState] = useState<SortState>(null)
 
@@ -992,7 +1035,10 @@ function RowsTable({
     () => (columns.length ? columns : Object.keys(rows[0] ?? {}).map((name) => ({ name, type_name: 'unknown' }))),
     [columns, rows],
   )
+  const activeSort: SortState = onServerSort ? serverSort : sortState
+
   const sortedRows = useMemo(() => {
+    if (onServerSort) return rows
     if (!sortState || !displayColumns.some((column) => column.name === sortState.column)) {
       return rows
     }
@@ -1005,9 +1051,14 @@ function RowsTable({
         return comparison === 0 ? left.index - right.index : comparison * directionMultiplier
       })
       .map(({ row }) => row)
-  }, [displayColumns, rows, sortState])
+  }, [displayColumns, rows, sortState, onServerSort, serverSort])
 
   const toggleSort = (columnName: string) => {
+    if (onServerSort) {
+      const current = serverSort && serverSort.column === columnName ? serverSort.direction : null
+      onServerSort(columnName, current === null ? 'asc' : current === 'asc' ? 'desc' : null)
+      return
+    }
     setSortState((current) => {
       if (!current || current.column !== columnName) return { column: columnName, direction: 'asc' }
       if (current.direction === 'asc') return { column: columnName, direction: 'desc' }
@@ -1175,7 +1226,7 @@ function RowsTable({
       <thead>
         <tr>
           {displayColumns.map((column) => {
-            const activeDirection = sortState?.column === column.name ? sortState.direction : null
+            const activeDirection = activeSort?.column === column.name ? activeSort.direction : null
             return (
               <th key={column.name} title={column.type_name}>
                 <div className="th-content">

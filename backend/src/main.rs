@@ -244,6 +244,10 @@ struct CacheQuery {
     cache_ttl_minutes: Option<u64>,
     #[serde(default)]
     sample_limit: Option<usize>,
+    #[serde(default)]
+    order_by: Option<String>,
+    #[serde(default)]
+    order_dir: Option<String>,
 }
 
 fn deserialize_refresh_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -606,10 +610,15 @@ async fn get_table_detail(
         };
 
         let sample_limit = cache_query.sample_limit.unwrap_or(100);
+        let order_clause = sanitized_order_clause(
+            &cache_query.order_by,
+            &cache_query.order_dir,
+            columns.iter().map(|column| column.name.as_str()),
+        );
         let data_response = execute_archery_query(
             &saved,
             &format!(
-                "SELECT * FROM {}.{} LIMIT {sample_limit}",
+                "SELECT * FROM {}.{}{order_clause} LIMIT {sample_limit}",
                 quote_identifier(&database),
                 quote_identifier(&table)
             ),
@@ -664,8 +673,13 @@ async fn get_table_detail(
         .collect::<Vec<_>>();
 
     let sample_limit = cache_query.sample_limit.unwrap_or(100);
+    let order_clause = sanitized_order_clause(
+        &cache_query.order_by,
+        &cache_query.order_dir,
+        columns.iter().map(|column| column.name.as_str()),
+    );
     let data_sql = format!(
-        "SELECT * FROM {}.{} LIMIT {sample_limit}",
+        "SELECT * FROM {}.{}{order_clause} LIMIT {sample_limit}",
         quote_identifier(&database),
         quote_identifier(&table)
     );
@@ -1424,6 +1438,39 @@ mod tests {
         assert_eq!(parsed.password, "secret");
         assert_eq!(parsed.database.as_deref(), Some("app_db"));
     }
+
+    #[test]
+    fn builds_order_clause_only_for_real_columns() {
+        let columns = ["id", "operation_time"];
+
+        let clause = sanitized_order_clause(
+            &Some("operation_time".into()),
+            &Some("DESC".into()),
+            columns.iter().copied(),
+        );
+        assert_eq!(clause, " ORDER BY `operation_time` DESC");
+
+        let ascending = sanitized_order_clause(
+            &Some("id".into()),
+            &Some("asc".into()),
+            columns.iter().copied(),
+        );
+        assert_eq!(ascending, " ORDER BY `id` ASC");
+
+        // Unknown columns and injection attempts are ignored entirely.
+        assert_eq!(
+            sanitized_order_clause(
+                &Some("evil`; DROP TABLE t".into()),
+                &Some("DESC".into()),
+                columns.iter().copied(),
+            ),
+            ""
+        );
+        assert_eq!(
+            sanitized_order_clause(&None, &None, columns.iter().copied()),
+            ""
+        );
+    }
 }
 
 fn summary_from_saved(saved: &SavedConnection, connected: bool) -> ConnectionSummary {
@@ -1537,6 +1584,43 @@ async fn show_create_table(
 
 fn quote_identifier(value: &str) -> String {
     format!("`{}`", value.replace('`', "``"))
+}
+
+/// Build the ORDER BY clause used when sampling table rows. The requested
+/// column must exist in the table's real column list (this prevents SQL
+/// injection and ignores unknown columns), and the direction is limited to
+/// ASC/DESC. Returns an empty string when no valid ordering was requested.
+fn sanitized_order_clause<I>(
+    order_by: &Option<String>,
+    order_dir: &Option<String>,
+    column_names: I,
+) -> String
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let Some(name) = order_by
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return String::new();
+    };
+    if !column_names
+        .into_iter()
+        .any(|column| column.as_ref() == name)
+    {
+        return String::new();
+    }
+    let direction = match order_dir
+        .as_deref()
+        .map(|value| value.trim().to_ascii_uppercase())
+        .as_deref()
+    {
+        Some("DESC") => "DESC",
+        _ => "ASC",
+    };
+    format!(" ORDER BY {} {direction}", quote_identifier(name))
 }
 
 fn row_to_json_map(row: &MySqlRow) -> Map<String, Value> {
